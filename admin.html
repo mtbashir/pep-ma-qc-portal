@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PEP MA QC — Admin</title>
+<link rel="stylesheet" href="css/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚙</text></svg>">
+</head>
+<body>
+
+<!-- ============ LOGIN ============ -->
+<div id="login-screen" class="login-screen hidden">
+  <form id="login-form" class="login-card">
+    <h1>PEP MA <span>QC Admin</span></h1>
+    <p class="login-sub">Administrator sign-in</p>
+    <div id="demo-banner" class="demo-banner hidden">
+      Demo mode — backend not configured yet.<br>Sign in with <b>admin / admin</b>.
+    </div>
+    <label>Username
+      <input type="text" id="login-username" autocomplete="username" required>
+    </label>
+    <label>Password
+      <input type="password" id="login-password" autocomplete="current-password" required>
+    </label>
+    <button type="submit" id="login-btn" class="btn btn-primary btn-block">Sign in</button>
+    <div id="login-error" class="error-msg hidden"></div>
+  </form>
+</div>
+
+<!-- ============ ADMIN ============ -->
+<div id="app-screen" class="app-screen hidden">
+  <header class="topbar">
+    <div class="brand">PEP MA <span>QC Admin</span></div>
+    <div class="filters"></div>
+    <div class="userbox">
+      <span id="user-name"></span>
+      <a href="index.html" title="QC portal">✅ QC Portal</a>
+      <button id="btn-logout" class="btn btn-ghost">Sign out</button>
+    </div>
+  </header>
+
+  <main class="admin-main">
+
+    <div class="card">
+      <h2>Create QC user</h2>
+      <form id="create-form" class="form-row">
+        <label>Username <input type="text" id="new-username" required pattern="[A-Za-z0-9._-]{3,30}"></label>
+        <label>Display name <input type="text" id="new-displayname"></label>
+        <label>Password <input type="text" id="new-password" required minlength="6"></label>
+        <label>Role
+          <select id="new-role">
+            <option value="qc">QC user</option>
+            <option value="admin">Admin</option>
+          </select>
+        </label>
+        <button type="submit" class="btn btn-primary">+ Create user</button>
+      </form>
+      <div id="create-msg" class="error-msg hidden"></div>
+    </div>
+
+    <div class="card">
+      <h2>Users</h2>
+      <table class="table" id="users-table">
+        <thead><tr><th>Username</th><th>Display name</th><th>Role</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>QC progress &amp; export</h2>
+      <div class="form-row" style="margin-bottom:12px">
+        <label>Date <select id="prog-date"><option value="">Select date…</option></select></label>
+        <button id="btn-progress" class="btn btn-primary" disabled>Show progress</button>
+        <button id="btn-export" class="btn" disabled>⬇ Download QC RD xlsx</button>
+        <a id="sheet-link" class="btn hidden" target="_blank" rel="noopener">Open QC Google Sheet</a>
+      </div>
+      <table class="table hidden" id="progress-table">
+        <thead><tr><th>Folder</th><th>Photos</th><th>With data</th><th>Done</th><th>Flagged</th><th>Pending</th><th style="width:180px">Progress</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+  </main>
+  <div id="toast" class="toast hidden"></div>
+</div>
+
+<script src="js/config.js"></script>
+<script src="js/api.js"></script>
+<script src="js/admin.js"></script>
+</body>
+</html>
