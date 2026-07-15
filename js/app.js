@@ -9,7 +9,8 @@
     record: null,          // current getRecord payload
     qcStart: null,         // ISO time when current record was shown
     imageIndex: 0,
-    filters: { date: '', folderType: '', city: '', auditor: '', channel: '' }
+    filters: { date: '', folderType: '', city: '', auditor: '', channel: '' },
+    session: { photos: {}, changes: 0, flagged: 0 }   // local live counters
   };
 
   /* ================= boot / auth ================= */
@@ -59,11 +60,72 @@
     }
   });
 
-  $('btn-logout').addEventListener('click', async function () {
+  async function doLogout() {
     try { await window.QCApi.call('logout'); } catch (e) { /* ignore */ }
     window.QCApi.clearSession();
     location.reload();
-  });
+  }
+
+  // Sign out shows the session summary first (falls back to plain logout
+  // if the backend does not support summaries yet)
+  $('btn-logout').addEventListener('click', function () { openSummary(true); });
+  $('btn-session').addEventListener('click', function () { openSummary(false); });
+  $('summary-close').addEventListener('click', function () { $('summary-modal').classList.add('hidden'); });
+  $('summary-signout').addEventListener('click', doLogout);
+
+  /* ================= session summary ================= */
+
+  function fmtDuration(min) {
+    min = Number(min) || 0;
+    return min >= 60 ? Math.floor(min / 60) + 'h ' + ('0' + (min % 60)).slice(-2) + 'm' : min + 'm';
+  }
+
+  function updateSessionStats() {
+    var n = Object.keys(state.session.photos).length;
+    $('session-stats').textContent = n
+      ? 'You this session: ' + n + ' QC’d · ' + state.session.changes + ' changes'
+      : '';
+  }
+
+  async function openSummary(fromSignout) {
+    var s;
+    try {
+      s = await window.QCApi.call('getSessionSummary');
+    } catch (e) {
+      if (fromSignout) { doLogout(); return; }
+      toast(e.message, 'err'); if (e.auth) showLogin();
+      return;
+    }
+    $('summary-user').textContent = (s.displayName || s.username) +
+      (s.sessionStart ? ' — signed in ' + s.sessionStart : '');
+    var rows = [
+      ['Pictures audited', s.photosAudited],
+      ['Saves', s.saves],
+      ['Changes made', s.changesMade],
+      ['Flagged', s.flagged],
+      ['Session start', s.sessionStart || '—'],
+      ['Last save', s.lastSave || '—'],
+      ['Total time', fmtDuration(s.totalMinutes)]
+    ];
+    var tbl = $('summary-table');
+    tbl.innerHTML = '';
+    rows.forEach(function (r) {
+      var tr = document.createElement('tr');
+      tr.innerHTML = '<td class="k"></td><td class="v"></td>';
+      tr.children[0].textContent = r[0];
+      tr.children[1].textContent = String(r[1]);
+      tbl.appendChild(tr);
+    });
+    var fld = $('summary-folders');
+    fld.innerHTML = '';
+    (s.byFolder || []).forEach(function (f) {
+      var div = document.createElement('div');
+      div.textContent = f.folderType + ': ' + f.photos + ' photos · ' + f.changes + ' changes';
+      fld.appendChild(div);
+    });
+    $('summary-signout').classList.toggle('hidden', !fromSignout);
+    $('summary-modal').classList.remove('hidden');
+  }
 
   /* ================= filters ================= */
 
@@ -434,6 +496,10 @@
         remarks: remarks || ''
       };
       var res = await window.QCApi.call('saveQC', payload);
+      state.session.photos[payload.date + '|' + payload.folderType + '|' + payload.id] = 1;
+      state.session.changes += res.changed || 0;
+      if (res.status === 'FLAGGED') state.session.flagged++;
+      updateSessionStats();
       var q = state.queue[state.pos];
       q.qcStatus = res.status;
       renderJump();
@@ -465,6 +531,7 @@
   document.addEventListener('keydown', function (ev) {
     if ($('app-screen').classList.contains('hidden')) return;
     if (!$('flag-modal').classList.contains('hidden')) return;
+    if (!$('summary-modal').classList.contains('hidden')) return;
     var inField = /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName);
     if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 's') {
       ev.preventDefault(); save('DONE'); return;

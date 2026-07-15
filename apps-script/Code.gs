@@ -96,17 +96,19 @@ function route(p) {
     case 'getRecord':  return getRecord(p);
     case 'getImage':   return getImage(p.fileId);
     case 'saveQC':     return saveQC(p, session);
+    case 'getSessionSummary': return getSessionSummary(p, session);
   }
 
   // Admin-only actions
   if (session.role !== 'admin') throw new Error('Admin access required');
   switch (action) {
-    case 'listUsers':   return listUsers();
-    case 'createUser':  return createUser(p, session);
-    case 'setPassword': return setPassword(p);
-    case 'setActive':   return setActive(p);
-    case 'getProgress': return getProgress(p.date);
-    case 'exportQc':    return exportQc(p.date);
+    case 'listUsers':    return listUsers();
+    case 'createUser':   return createUser(p, session);
+    case 'setPassword':  return setPassword(p);
+    case 'setActive':    return setActive(p);
+    case 'getProgress':  return getProgress(p.date);
+    case 'exportQc':     return exportQc(p.date);
+    case 'listSessions': return listSessions();
   }
   throw new Error('Unknown action: ' + action);
 }
@@ -128,13 +130,21 @@ function dbSheet(name, headers) {
     sh = ss.insertSheet(name);
     sh.appendRow(headers);
     sh.setFrozenRows(1);
+  } else {
+    // migration: append any headers added in later versions
+    var existing = sh.getRange(1, 1, 1, Math.max(sh.getLastColumn(), 1)).getValues()[0].map(String);
+    var missing = headers.filter(function (h) { return existing.indexOf(h) === -1; });
+    if (missing.length) sh.getRange(1, existing.length + 1, 1, missing.length).setValues([missing]);
   }
   return sh;
 }
 
 function usersSheet()    { return dbSheet('Users',    ['username', 'displayName', 'role', 'salt', 'hash', 'active', 'createdAt', 'createdBy']); }
-function sessionsSheet() { return dbSheet('Sessions', ['token', 'username', 'displayName', 'role', 'expiresAt']); }
-function qcLogSheet()    { return dbSheet('QCLog',    ['savedAt', 'date', 'folderType', '_id', 'qcUser', 'qcStart', 'qcEnd', 'status', 'changeCount', 'changes', 'remarks']); }
+function sessionsSheet() { return dbSheet('Sessions', ['token', 'username', 'displayName', 'role', 'expiresAt', 'createdAt']); }
+function qcLogSheet()    { return dbSheet('QCLog',    ['savedAt', 'date', 'folderType', '_id', 'qcUser', 'qcStart', 'qcEnd', 'status', 'changeCount', 'changes', 'remarks', 'sessionId']); }
+
+/** Short public id of a login session (safe to store in logs — not the full token). */
+function sessionIdFromToken(token) { return String(token || '').slice(0, 8); }
 
 /** One-time initialisation: creates the DB spreadsheet, output folder and admin user. */
 function setup() {
@@ -192,17 +202,18 @@ function login(p) {
   var token = Utilities.getUuid();
   var expires = new Date(Date.now() + CONFIG.SESSION_HOURS * 3600 * 1000);
   var session = { username: u.username, displayName: u.displayName, role: u.role };
-  sessionsSheet().appendRow([token, u.username, u.displayName, u.role, expires]);
+  sessionsSheet().appendRow([token, u.username, u.displayName, u.role, expires, new Date()]);
   CacheService.getScriptCache().put('sess_' + token, JSON.stringify(session), 21600);
   return { ok: true, data: { token: token, user: session } };
 }
 
 function logout(token) {
   CacheService.getScriptCache().remove('sess_' + token);
+  // expire the row instead of deleting it, so session history (createdAt) is kept
   var sh = sessionsSheet();
   var tokens = colValues(sh, 1);
   var idx = tokens.indexOf(token);
-  if (idx >= 0) sh.deleteRow(idx + 2);
+  if (idx >= 0) sh.getRange(idx + 2, 5).setValue(new Date());
   return { ok: true };
 }
 
@@ -602,13 +613,120 @@ function saveQC(p, session) {
     qcLogSheet().appendRow([
       new Date(), p.date, p.folderType, String(p.id), session.username,
       p.qcStart || '', p.qcEnd || '', status,
-      Object.keys(applied).length, JSON.stringify(applied), p.remarks || ''
+      Object.keys(applied).length, JSON.stringify(applied), p.remarks || '',
+      sessionIdFromToken(p.token)
     ]);
 
     return { ok: true, data: { id: String(p.id), status: status, changed: Object.keys(applied).length } };
   } finally {
     lock.releaseLock();
   }
+}
+
+/* ------------------------------------------------------------------ *
+ *  Session summaries
+ * ------------------------------------------------------------------ */
+
+/** Summary of the calling user's current login session, computed from QCLog. */
+function getSessionSummary(p, session) {
+  var sid = sessionIdFromToken(p.token);
+  var data = qcLogSheet().getDataRange().getValues();
+  var hdr = data.length ? data[0].map(String) : [];
+  var iSid = hdr.indexOf('sessionId'), iSaved = hdr.indexOf('savedAt'),
+      iCount = hdr.indexOf('changeCount'), iStatus = hdr.indexOf('status'),
+      iDate = hdr.indexOf('date'), iFolder = hdr.indexOf('folderType'), iId = hdr.indexOf('_id');
+
+  var photos = {}, saves = 0, changes = 0, flagged = 0, first = null, last = null, byFolder = {};
+  for (var r = 1; r < data.length; r++) {
+    if (iSid === -1 || String(data[r][iSid] || '') !== sid) continue;
+    var saved = new Date(data[r][iSaved]);
+    saves++;
+    changes += Number(data[r][iCount]) || 0;
+    if (String(data[r][iStatus]) === 'FLAGGED') flagged++;
+    var pKey = data[r][iDate] + '|' + data[r][iFolder] + '|' + data[r][iId];
+    photos[pKey] = 1;
+    var f = byFolder[data[r][iFolder]] = byFolder[data[r][iFolder]] || { folderType: String(data[r][iFolder]), photos: {}, changes: 0 };
+    f.photos[pKey] = 1;
+    f.changes += Number(data[r][iCount]) || 0;
+    if (!first || saved < first) first = saved;
+    if (!last || saved > last) last = saved;
+  }
+
+  // session start = login time (falls back to the first save for old sessions)
+  var loginAt = null;
+  var sess = sessionsSheet().getDataRange().getValues();
+  for (var i = 1; i < sess.length; i++) {
+    if (String(sess[i][0]) === String(p.token)) {
+      if (sess[i][5]) loginAt = new Date(sess[i][5]);
+      break;
+    }
+  }
+  var start = loginAt || first;
+  return { ok: true, data: {
+    username: session.username,
+    displayName: session.displayName,
+    photosAudited: Object.keys(photos).length,
+    saves: saves,
+    changesMade: changes,
+    flagged: flagged,
+    sessionStart: start ? fmtValue(start) : '',
+    lastSave: last ? fmtValue(last) : '',
+    totalMinutes: start ? Math.max(0, Math.round((new Date() - start) / 60000)) : 0,
+    byFolder: Object.keys(byFolder).map(function (k) {
+      return { folderType: byFolder[k].folderType, photos: Object.keys(byFolder[k].photos).length, changes: byFolder[k].changes };
+    })
+  } };
+}
+
+/** Admin report: one row per login session with QC activity (latest 100). */
+function listSessions() {
+  var data = qcLogSheet().getDataRange().getValues();
+  if (data.length < 2) return { ok: true, data: [] };
+  var hdr = data[0].map(String);
+  var iSid = hdr.indexOf('sessionId'), iSaved = hdr.indexOf('savedAt'),
+      iCount = hdr.indexOf('changeCount'), iStatus = hdr.indexOf('status'),
+      iDate = hdr.indexOf('date'), iFolder = hdr.indexOf('folderType'),
+      iId = hdr.indexOf('_id'), iUser = hdr.indexOf('qcUser');
+
+  // login time per session id
+  var loginAt = {};
+  var sess = sessionsSheet().getDataRange().getValues();
+  for (var i = 1; i < sess.length; i++) {
+    if (sess[i][5]) loginAt[sessionIdFromToken(sess[i][0])] = new Date(sess[i][5]);
+  }
+
+  var groups = {};
+  for (var r = 1; r < data.length; r++) {
+    var row = data[r];
+    var saved = new Date(row[iSaved]);
+    var sid = iSid !== -1 ? String(row[iSid] || '') : '';
+    // saves from before this feature have no sessionId: group them per user + day
+    var key = sid || (String(row[iUser]) + '|' + Utilities.formatDate(saved, Session.getScriptTimeZone(), 'yyyy-MM-dd'));
+    var g = groups[key] = groups[key] || { sid: sid, username: String(row[iUser]), photos: {}, saves: 0, changes: 0, flagged: 0, first: saved, last: saved };
+    g.saves++;
+    g.changes += Number(row[iCount]) || 0;
+    if (String(row[iStatus]) === 'FLAGGED') g.flagged++;
+    g.photos[row[iDate] + '|' + row[iFolder] + '|' + row[iId]] = 1;
+    if (saved < g.first) g.first = saved;
+    if (saved > g.last) g.last = saved;
+  }
+
+  var out = Object.keys(groups).map(function (k) {
+    var g = groups[k];
+    var start = (g.sid && loginAt[g.sid] && loginAt[g.sid] < g.first) ? loginAt[g.sid] : g.first;
+    return {
+      username: g.username,
+      start: fmtValue(start),
+      end: fmtValue(g.last),
+      durationMin: Math.max(0, Math.round((g.last - start) / 60000)),
+      photos: Object.keys(g.photos).length,
+      saves: g.saves,
+      changes: g.changes,
+      flagged: g.flagged
+    };
+  });
+  out.sort(function (a, b) { return a.end < b.end ? 1 : -1; });
+  return { ok: true, data: out.slice(0, 100) };
 }
 
 /* ------------------------------------------------------------------ *

@@ -68,6 +68,18 @@
     </div>
 
     <div class="card">
+      <h2>User sessions</h2>
+      <p class="card-sub">One row per sign-in session: pictures audited, changes made, start / end time and total time.</p>
+      <div class="form-row" style="margin-bottom:12px">
+        <button id="btn-sessions-refresh" class="btn btn-primary">↻ Refresh</button>
+      </div>
+      <table class="table" id="sessions-table">
+        <thead><tr><th>User</th><th>Start</th><th>End (last save)</th><th>Total time</th><th>Pictures</th><th>Saves</th><th>Changes</th><th>Flagged</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
       <h2>QC progress &amp; export</h2>
       <div class="form-row" style="margin-bottom:12px">
         <label>Date <select id="prog-date"><option value="">Select date…</option></select></label>

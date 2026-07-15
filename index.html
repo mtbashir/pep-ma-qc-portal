@@ -46,6 +46,7 @@
     <div class="userbox">
       <span id="user-name"></span>
       <a id="admin-link" href="admin.html" class="hidden" title="Admin portal">⚙ Admin</a>
+      <button id="btn-session" class="btn btn-ghost" title="My session summary">📊 Summary</button>
       <button id="btn-logout" class="btn btn-ghost">Sign out</button>
     </div>
   </header>
@@ -55,6 +56,7 @@
     <select id="queue-jump" class="queue-jump"></select>
     <span id="queue-pos" class="queue-pos"></span>
     <span id="queue-stats" class="queue-stats"></span>
+    <span id="session-stats" class="session-stats" title="Your activity in this sign-in session"></span>
     <label class="chk"><input type="checkbox" id="chk-skip-done"> Skip already QC'd</label>
     <label class="chk"><input type="checkbox" id="chk-auto-next" checked> Auto-next after save</label>
     <button id="btn-next" class="btn btn-nav" title="Next (→)">›</button>
@@ -111,6 +113,20 @@
   </div>
 
   <div id="toast" class="toast hidden"></div>
+</div>
+
+<!-- Session summary dialog -->
+<div id="summary-modal" class="modal hidden">
+  <div class="modal-card">
+    <h3>📊 Session summary</h3>
+    <p id="summary-user"></p>
+    <table class="kv-table" id="summary-table"></table>
+    <div id="summary-folders" class="summary-folders"></div>
+    <div class="action-row">
+      <button id="summary-close" class="btn btn-ghost">Continue working</button>
+      <button id="summary-signout" class="btn btn-primary">Sign out</button>
+    </div>
+  </div>
 </div>
 
 <!-- Flag dialog -->

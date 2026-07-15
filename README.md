@@ -124,6 +124,20 @@ automatically whenever a direct load fails, so it is safe to leave on.
    QC'd" jumps over finished items.
 5. Admin → **QC progress & export** shows per-folder completion and downloads
    the corrected `QC RD <date>.xlsx`.
+6. **Session summaries**: the queue bar shows a live counter of your activity,
+   the **📊 Summary** button (and the Sign out button) show your session
+   summary — pictures audited, changes made, session start / end and total
+   time. Admins additionally get a **User sessions** report on the admin page
+   with one row per sign-in session.
+
+## Updating the backend after a code change
+
+When `apps-script/Code.gs` changes in this repo, the deployed web app does NOT
+update automatically:
+
+1. Paste the new `Code.gs` over the old one at script.google.com.
+2. **Deploy → Manage deployments → ✏️ (edit) → Version: New version → Deploy.**
+   The web app URL stays the same, so nothing else needs to change.
 
 ## Repo layout
 

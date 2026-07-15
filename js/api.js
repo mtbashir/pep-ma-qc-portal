@@ -74,6 +74,13 @@
     { id: '810018529', city: '6.LHR', auditor: 'DEMO AUDITOR 2', storeId: 'LHR-0201', storeName: 'SINDHI BIRYANI', channel: '2.LMT', qcStatus: '', qcUser: '', imageCount: 1 }
   ];
 
+  function nowStr() {
+    var d = new Date();
+    function p(n) { return ('0' + n).slice(-2); }
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+  var demoSession = { photos: {}, saves: 0, changes: 0, flagged: 0, start: nowStr(), startMs: Date.now() };
+
   function demoImage(id) {
     var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1200">' +
       '<rect width="100%" height="100%" fill="#1a3a5c"/>' +
@@ -121,7 +128,28 @@
       case 'saveQC':
         var it = DEMO_QUEUE.filter(function (x) { return x.id === String(p.id); })[0];
         if (it) { it.qcStatus = p.status || 'DONE'; it.qcUser = 'demo'; }
+        demoSession.saves++;
+        demoSession.photos[String(p.id)] = 1;
+        demoSession.changes += Object.keys(p.changes || {}).length;
+        if (p.status === 'FLAGGED') demoSession.flagged++;
         return { id: String(p.id), status: p.status || 'DONE', changed: Object.keys(p.changes || {}).length };
+      case 'getSessionSummary':
+        return {
+          username: 'demo', displayName: 'Demo QC User',
+          photosAudited: Object.keys(demoSession.photos).length,
+          saves: demoSession.saves,
+          changesMade: demoSession.changes,
+          flagged: demoSession.flagged,
+          sessionStart: demoSession.start,
+          lastSave: demoSession.saves ? nowStr() : '',
+          totalMinutes: Math.max(1, Math.round((Date.now() - demoSession.startMs) / 60000)),
+          byFolder: demoSession.saves ? [{ folderType: 'PEP COOLER', photos: Object.keys(demoSession.photos).length, changes: demoSession.changes }] : []
+        };
+      case 'listSessions':
+        return [
+          { username: 'demo', start: '2026-07-15 09:12:04', end: '2026-07-15 11:41:30', durationMin: 149, photos: 118, saves: 121, changes: 34, flagged: 5 },
+          { username: 'qc.ali', start: '2026-07-15 08:55:10', end: '2026-07-15 10:02:45', durationMin: 67, photos: 64, saves: 64, changes: 12, flagged: 1 }
+        ];
       case 'listUsers':
         return [{ username: 'admin', displayName: 'Demo Admin', role: 'admin', active: true, createdAt: '2026-07-15', createdBy: 'setup' },
                 { username: 'demo', displayName: 'Demo QC User', role: 'qc', active: true, createdAt: '2026-07-15', createdBy: 'admin' }];

@@ -22,6 +22,7 @@
     $('user-name').textContent = user.displayName + ' (' + user.username + ')';
     refreshUsers();
     loadDates();
+    loadSessions();
   }
 
   async function boot() {
@@ -121,6 +122,36 @@
       refreshUsers();
     } catch (e) { toast(e.message, 'err'); }
   }
+
+  /* ---------------- user sessions ---------------- */
+
+  function fmtDuration(min) {
+    min = Number(min) || 0;
+    return min >= 60 ? Math.floor(min / 60) + 'h ' + ('0' + (min % 60)).slice(-2) + 'm' : min + 'm';
+  }
+
+  async function loadSessions() {
+    var tb = $('sessions-table').querySelector('tbody');
+    try {
+      var sessions = await window.QCApi.call('listSessions');
+      tb.innerHTML = '';
+      if (!sessions.length) {
+        tb.innerHTML = '<tr><td colspan="8" style="color:var(--muted)">No QC activity yet.</td></tr>';
+        return;
+      }
+      sessions.forEach(function (s) {
+        var tr = document.createElement('tr');
+        tr.innerHTML = '<td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>';
+        var vals = [s.username, s.start, s.end, fmtDuration(s.durationMin), s.photos, s.saves, s.changes, s.flagged];
+        vals.forEach(function (v, i) { tr.children[i].textContent = String(v); });
+        tb.appendChild(tr);
+      });
+    } catch (e) {
+      tb.innerHTML = '<tr><td colspan="8" style="color:var(--muted)">Not available — update the backend: paste the latest apps-script/Code.gs and deploy a new version.</td></tr>';
+    }
+  }
+
+  $('btn-sessions-refresh').addEventListener('click', loadSessions);
 
   /* ---------------- progress / export ---------------- */
 
