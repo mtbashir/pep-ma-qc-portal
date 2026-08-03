@@ -18,7 +18,10 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '3.0',
+  VERSION: '3.1',
+
+  QUEUE_FIRST_PAGE: 60,     // shown immediately
+  QUEUE_PAGE: 150,          // fetched in the background afterwards
 
   // Root Drive folder that contains one subfolder per day (YYYY-MM-DD)
   ROOT_FOLDER_ID: '15r9ltXPk4Ehc2ViR-UJ6277lmjbI9o2m',
@@ -697,7 +700,11 @@ function measureIndexes(headers, folderType) {
  * work it does, so combining calls matters as much as making them cheap.
  */
 function bootstrap(p) {
-  var out = { dates: getDates().data };
+  var out = {
+    dates: getDates().data,
+    version: CONFIG.VERSION,
+    queue: { firstPage: CONFIG.QUEUE_FIRST_PAGE, page: CONFIG.QUEUE_PAGE }
+  };
   if (p.date) {
     out.folders = getFolders(p.date).data;
     out.filters = getFilters(p.date).data;
@@ -731,69 +738,122 @@ function getFilters(date) {
  * Builds the QC queue: survey rows that have a photo in the selected folder,
  * filtered by city/auditor/channel, sorted by _id.
  */
-function getQueue(p) {
-  var date = p.date, folderType = p.folderType;
-  var idx = dateIndex(date);
-  var imgs = imageMap(date, folderType);
-  if (idx.lastRow < 2) return { ok: true, data: { items: [], unmatchedImages: 0 } };
+/** Tiny stopwatch so the portal can ask where a slow request spent its time. */
+function timer() {
+  var t0 = Date.now(), last = t0, marks = {};
+  return {
+    mark: function (name) { marks[name] = Date.now() - last; last = Date.now(); },
+    done: function () { marks.total = Date.now() - t0; return marks; }
+  };
+}
 
-  // Fixed columns, plus (when the portal asks for them) every measure column.
-  // Shipping the values with the queue means the portal needs NO per-photo
-  // request afterwards — the biggest win available, because each Apps Script
-  // round trip costs seconds and occasionally stalls badly.
+/**
+ * The stable part of the queue: which rows match the filters, in _id order.
+ * Store identity never changes, so this is cached and every later page skips
+ * the full-sheet scan. QC status is deliberately NOT cached — it is read
+ * fresh on each page so progress marks stay correct.
+ */
+function queueList(p, idx, imgs) {
+  var key = ['qlist4', p.date, p.folderType, p.city || '', p.auditor || '', p.channel || ''].join('|');
+  var hit = cacheGetBig(key);
+  if (hit) { try { return JSON.parse(hit); } catch (e) { /* rebuild */ } }
+
   var wanted = [
     CONFIG.ID_HEADER, CONFIG.FILTERS.city, CONFIG.FILTERS.auditor,
     'Select Store ID', 'Select Store Name', CONFIG.FILTERS.channel,
-    qcColName(folderType, 'Status'), qcColName(folderType, 'User'),
-    qcColName(folderType, 'End'), '1.9: Shop Status Code'
+    '1.9: Shop Status Code'
   ];
-  var withValues = p.includeValues !== false;
-  var schema = withValues ? measureSchema(idx.headers, folderType) : [];
-  var mIdx = withValues ? measureIndexes(idx.headers, folderType) : [];
-
-  var ranges = wanted.map(function (h) { return colRange(idx, h); })
-    .concat(mIdx.map(function (i) {
-      var c = colLetter(i + 1);
-      return quoteSheet(idx.sheetName) + '!' + c + '2:' + c + idx.lastRow;
-    }));
-
-  var cols = valuesBatchGet(idx.ssId, ranges, 'COLUMNS').map(firstLine);
+  var cols = valuesBatchGet(idx.ssId, wanted.map(function (h) { return colRange(idx, h); }), 'COLUMNS').map(firstLine);
   function cell(c, r) { var v = cols[c] && cols[c][r]; return v === undefined || v === null ? '' : String(v); }
 
-  var items = [];
-  var matchedIds = {};
-  var base = wanted.length;
+  var items = [], matched = {};
   for (var r = 0; r < cols[0].length; r++) {
     var id = cell(0, r).replace(/\.0$/, '').trim();
     if (!id || !imgs[id]) continue;
     if (p.city    && cell(1, r).trim() !== p.city)    continue;
     if (p.auditor && cell(2, r).trim() !== p.auditor) continue;
     if (p.channel && cell(5, r).trim() !== p.channel) continue;
-    matchedIds[id] = 1;
-
-    var item = {
-      id: id,
-      city: cell(1, r),
-      auditor: cell(2, r),
-      storeId: cell(3, r),
-      storeName: cell(4, r),
-      channel: cell(5, r),
-      qcStatus: cell(6, r),
-      qcUser: cell(7, r),
-      qcEnd: cell(8, r),
-      shopStatus: cell(9, r),
-      imageCount: imgs[id].length
-    };
-    if (withValues) {
-      item.values = mIdx.map(function (_, k) { return cell(base + k, r); });
-      item.images = imgs[id];   // [{fileId, name}]
-    }
-    items.push(item);
+    matched[id] = 1;
+    items.push({
+      id: id, row: r + 2,
+      city: cell(1, r), auditor: cell(2, r),
+      storeId: cell(3, r), storeName: cell(4, r),
+      channel: cell(5, r), shopStatus: cell(6, r)
+    });
   }
   items.sort(function (a, b) { return Number(a.id) - Number(b.id); });
 
-  var unmatched = Object.keys(imgs).filter(function (id) { return !matchedIds[id]; }).length;
-  return { ok: true, data: { items: items, schema: schema, unmatchedImages: unmatched } };
+  var list = {
+    items: items,
+    unmatchedImages: Object.keys(imgs).filter(function (id) { return !matched[id]; }).length
+  };
+  cachePutBig(key, JSON.stringify(list), 900);
+  return list;
+}
+
+/**
+ * One page of the QC queue, with the measure values for those rows only.
+ * The portal asks for a small first page so QC can start immediately, then
+ * pulls the rest in the background while the user works.
+ */
+function getQueue(p) {
+  var T = timer();
+  var folderType = p.folderType;
+  var idx = dateIndex(p.date);                       T.mark('index');
+  var imgs = imageMap(p.date, folderType);           T.mark('images');
+  if (idx.lastRow < 2) return { ok: true, data: { items: [], schema: [], total: 0, offset: 0, unmatchedImages: 0 } };
+
+  var list = queueList(p, idx, imgs);                T.mark('list');
+
+  var offset = Math.max(0, Number(p.offset) || 0);
+  var limit = Number(p.limit) > 0 ? Number(p.limit) : list.items.length;
+  var slice = list.items.slice(offset, offset + limit);
+
+  // QC status read fresh (cheap: 3 columns) so done/flagged marks are current
+  var statusCols = valuesBatchGet(idx.ssId, [
+    colRange(idx, qcColName(folderType, 'Status')),
+    colRange(idx, qcColName(folderType, 'User')),
+    colRange(idx, qcColName(folderType, 'End'))
+  ], 'COLUMNS').map(firstLine);                      T.mark('status');
+
+  var schema = measureSchema(idx.headers, folderType);
+  var mIdx = measureIndexes(idx.headers, folderType);
+  var lo = Math.min.apply(null, mIdx), hi = Math.max.apply(null, mIdx);
+  var q = quoteSheet(idx.sheetName);
+
+  // one range per row of this page — all fetched in a single call
+  var rowVals = [];
+  if (slice.length) {
+    rowVals = valuesBatchGet(idx.ssId, slice.map(function (it) {
+      return q + '!' + colLetter(lo + 1) + it.row + ':' + colLetter(hi + 1) + it.row;
+    })).map(firstLine);
+  }                                                  T.mark('values');
+
+  var items = slice.map(function (it, k) {
+    var span = rowVals[k] || [];
+    var si = it.row - 2;
+    function st(c) { var v = statusCols[c] && statusCols[c][si]; return v === undefined || v === null ? '' : String(v); }
+    return {
+      id: it.id, city: it.city, auditor: it.auditor,
+      storeId: it.storeId, storeName: it.storeName, channel: it.channel,
+      shopStatus: it.shopStatus,
+      qcStatus: st(0), qcUser: st(1), qcEnd: st(2),
+      imageCount: (imgs[it.id] || []).length,
+      images: imgs[it.id] || [],
+      values: mIdx.map(function (i) {
+        var v = span[i - lo];
+        return v === undefined || v === null ? '' : String(v);
+      })
+    };
+  });
+
+  var out = {
+    items: items, schema: schema,
+    total: list.items.length, offset: offset,
+    unmatchedImages: list.unmatchedImages
+  };
+  if (p.debug) out.timing = T.done();
+  return { ok: true, data: out };
 }
 
 /** Full detail for one survey id: context, editable measures, image references. */

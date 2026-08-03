@@ -14,7 +14,11 @@
     recordCache: {},      // key -> getRecord payload (prefetched)
     imageCache: {},       // fileId -> resolved img src
     imageOrder: [],       // fileIds in load order, for eviction
-    navToken: 0           // guards against out-of-order navigation
+    navToken: 0,          // guards against out-of-order navigation
+    loadToken: 0,         // guards background paging against filter changes
+    total: 0,             // photos matching the filters (may exceed loaded)
+    unmatched: 0,
+    pageSizes: { firstPage: 60, page: 150 }
   };
 
   var IMAGE_CACHE_MAX = 12;
@@ -152,6 +156,7 @@
     try {
       var boot = await window.QCApi.call('bootstrap', {});
       state.dates = boot.dates;
+      if (boot.queue) state.pageSizes = boot.queue;
       fillSelect($('f-date'), state.dates, 'Date…');
     } catch (e) { toast(e.message, 'err'); if (e.auth) showLogin(); }
   }
@@ -182,6 +187,17 @@
 
   /* ================= queue ================= */
 
+  function updateQueueStats() {
+    var done = state.queue.filter(function (q) { return q.qcStatus === 'DONE'; }).length;
+    var flagged = state.queue.filter(function (q) { return q.qcStatus === 'FLAGGED'; }).length;
+    var stats = state.total + ' photos · ' + done + ' done · ' + flagged + ' flagged';
+    if (state.queue.length < state.total) {
+      stats += ' · loading ' + state.queue.length + '/' + state.total + '…';
+    }
+    if (state.unmatched) stats += ' · ' + state.unmatched + ' images without survey data';
+    $('queue-stats').textContent = stats;
+  }
+
   async function loadQueue() {
     state.filters = {
       date: $('f-date').value, folderType: $('f-folder').value,
@@ -189,20 +205,22 @@
     };
     if (!state.filters.date || !state.filters.folderType) return;
     state.recordCache = {};   // different date/folder -> different records
+    var token = ++state.loadToken;
     $('btn-load').disabled = true;
     toast('Building QC queue…');
     try {
-      var data = await window.QCApi.call('getQueue',
-        Object.assign({ includeValues: true }, state.filters));
+      // small first page so QC can start straight away
+      var data = await window.QCApi.call('getQueue', Object.assign({
+        limit: state.pageSizes.firstPage, offset: 0
+      }, state.filters));
+      if (token !== state.loadToken) return;
+
       state.queue = data.items;
       state.schema = data.schema || null;
+      state.total = data.total === undefined ? data.items.length : data.total;
+      state.unmatched = data.unmatchedImages || 0;
       $('queue-bar').classList.remove('hidden');
-      var stats = state.queue.length + ' photos';
-      var done = state.queue.filter(function (q) { return q.qcStatus === 'DONE'; }).length;
-      var flagged = state.queue.filter(function (q) { return q.qcStatus === 'FLAGGED'; }).length;
-      stats += ' · ' + done + ' done · ' + flagged + ' flagged';
-      if (data.unmatchedImages) stats += ' · ' + data.unmatchedImages + ' images without survey data';
-      $('queue-stats').textContent = stats;
+      updateQueueStats();
       renderJump();
       hideToast();
       if (!state.queue.length) {
@@ -212,8 +230,32 @@
         return;
       }
       goTo(firstPending());
+      loadRemainingPages(token);          // continues while the user works
     } catch (e) { toast(e.message, 'err'); if (e.auth) showLogin(); }
     finally { $('btn-load').disabled = false; }
+  }
+
+  /** Pulls the rest of the queue in the background, page by page. */
+  async function loadRemainingPages(token) {
+    while (state.queue.length < state.total) {
+      if (token !== state.loadToken) return;      // filters changed — abandon
+      try {
+        var page = await window.QCApi.call('getQueue', Object.assign({
+          limit: state.pageSizes.page, offset: state.queue.length
+        }, state.filters));
+        if (token !== state.loadToken) return;
+        if (!page.items.length) break;            // nothing more to add
+        state.queue = state.queue.concat(page.items);
+        var pos = state.pos;
+        renderJump();
+        $('queue-jump').value = pos;
+        updateQueueStats();
+      } catch (e) {
+        if (e.auth) { showLogin(); return; }
+        return;                                    // leave what we have loaded
+      }
+    }
+    updateQueueStats();
   }
 
   function firstPending() {
@@ -246,7 +288,13 @@
     if ($('chk-skip-done').checked) {
       while (i >= 0 && i < state.queue.length && state.queue[i].qcStatus === 'DONE') i += dir;
     }
-    if (i < 0 || i >= state.queue.length) { toast(dir > 0 ? 'End of queue 🎉' : 'Start of queue', 'ok'); return; }
+    if (i < 0) { toast('Start of queue', 'ok'); return; }
+    if (i >= state.queue.length) {
+      // the rest of the queue may still be streaming in
+      if (state.queue.length < state.total) { toast('Loading more photos…'); return; }
+      toast('End of queue 🎉', 'ok');
+      return;
+    }
     goTo(i);
   }
 
@@ -322,7 +370,7 @@
     var token = ++state.navToken;
     state.pos = i;
     $('queue-jump').value = i;
-    $('queue-pos').textContent = (i + 1) + ' / ' + state.queue.length;
+    $('queue-pos').textContent = (i + 1) + ' / ' + (state.total || state.queue.length);
     $('empty-state').classList.add('hidden');
     $('workspace').classList.remove('hidden');
     $('context-table').innerHTML = '<tr><td class="k">Loading…</td></tr>';
@@ -656,9 +704,7 @@
       }
       renderJump();
       $('queue-jump').value = state.pos;
-      var done = state.queue.filter(function (x) { return x.qcStatus === 'DONE'; }).length;
-      var flagged = state.queue.filter(function (x) { return x.qcStatus === 'FLAGGED'; }).length;
-      $('queue-stats').textContent = state.queue.length + ' photos · ' + done + ' done · ' + flagged + ' flagged';
+      updateQueueStats();
       toast(res.status === 'FLAGGED' ? 'Flagged ⚑' : 'Saved ✔' + (res.changed ? ' (' + res.changed + ' change' + (res.changed > 1 ? 's' : '') + ')' : ''), 'ok');
       if ($('chk-auto-next').checked) step(1); else goTo(state.pos);
     } catch (e) { toast(e.message, 'err'); if (e.auth) showLogin(); }

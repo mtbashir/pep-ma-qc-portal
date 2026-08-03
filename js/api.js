@@ -102,7 +102,7 @@
         throw new Error('Demo mode: sign in with demo/demo (or admin/admin). Configure js/config.js to connect the real backend.');
       case 'logout': return {};
       case 'bootstrap':
-        var boot = { dates: ['2026-07-13'] };
+        var boot = { dates: ['2026-07-13'], version: 'demo', queue: { firstPage: 2, page: 2 } };
         if (p.date) {
           boot.folders = ['PEP COOLER', 'KO COOLER', 'OTHERS COOLER', 'STORES PHOTOS', 'MT SHELVES'];
           boot.filters = { cities: ['5.GJW', '6.LHR'], auditors: ['DEMO AUDITOR', 'DEMO AUDITOR 2'], channels: ['1.GT', '2.LMT'] };
@@ -112,9 +112,12 @@
       case 'getFolders': return ['PEP COOLER', 'KO COOLER', 'OTHERS COOLER', 'STORES PHOTOS', 'MT SHELVES'];
       case 'getFilters': return { cities: ['5.GJW', '6.LHR'], auditors: ['DEMO AUDITOR', 'DEMO AUDITOR 2'], channels: ['1.GT', '2.LMT'] };
       case 'getQueue':
-        var items = DEMO_QUEUE.filter(function (q) {
+        var all = DEMO_QUEUE.filter(function (q) {
           return (!p.city || q.city === p.city) && (!p.auditor || q.auditor === p.auditor) && (!p.channel || q.channel === p.channel);
-        }).map(function (q) {
+        });
+        var off = Number(p.offset) || 0;
+        var lim = Number(p.limit) > 0 ? Number(p.limit) : all.length;
+        var items = all.slice(off, off + lim).map(function (q) {
           return Object.assign({}, q, {
             shopStatus: 'Completed Interview',
             values: DEMO_MEASURES.map(function (m) { return q.vals && q.vals[m[0]] !== undefined ? q.vals[m[0]] : m[1]; }),
@@ -126,6 +129,7 @@
           schema: DEMO_MEASURES.map(function (m) {
             return { header: m[0], readOnly: false, isOption: m[0].indexOf('/') !== -1, options: m[2] || [] };
           }),
+          total: all.length, offset: off,
           unmatchedImages: 0
         };
       case 'getRecord':
