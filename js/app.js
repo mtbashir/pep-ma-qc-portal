@@ -487,17 +487,25 @@
       try { return cacheImageSrc(image.fileId, await probeUrl(image.directUrl + '=s' + size)); }
       catch (e) { /* not shared publicly — fall back to the API */ }
     }
-    // Apps Script occasionally answers a request with a transient 404, so one
-    // retry here saves the user from a spurious "could not load photo"
-    var d;
-    try {
-      d = await window.QCApi.call('getImage', { fileId: image.fileId, size: size });
-    } catch (e) {
-      if (e.auth) throw e;
-      await new Promise(function (r) { setTimeout(r, 600); });
-      d = await window.QCApi.call('getImage', { fileId: image.fileId, size: size });
+    // Apps Script drops the occasional request (transient 404 on the redirect,
+    // more often on big payloads), so retry with backoff and shrink the image
+    // on later attempts rather than failing in the user's face.
+    var delays = [0, 800, 2000, 4000];
+    var lastErr;
+    for (var attempt = 0; attempt < delays.length; attempt++) {
+      if (delays[attempt]) await new Promise(function (r) { setTimeout(r, delays[attempt]); });
+      try {
+        var d = await window.QCApi.call('getImage', {
+          fileId: image.fileId,
+          size: attempt < 2 ? size : Math.round(size * 0.6)
+        });
+        return cacheImageSrc(image.fileId, 'data:' + d.mime + ';base64,' + d.base64);
+      } catch (e) {
+        if (e.auth) throw e;
+        lastErr = e;
+      }
     }
-    return cacheImageSrc(image.fileId, 'data:' + d.mime + ';base64,' + d.base64);
+    throw lastErr;
   }
 
   async function loadImage(rec, index, token) {
@@ -534,6 +542,15 @@
       // paint an error over the photo they are looking at now
       if (token !== undefined && token !== state.navToken) return;
       showImageMsg('Could not load photo: ' + e.message, true);
+      var retry = document.createElement('button');
+      retry.className = 'btn';
+      retry.style.marginLeft = '12px';
+      retry.textContent = '↻ Retry';
+      retry.onclick = function () {
+        delete state.imageCache[image.fileId];
+        loadImage(rec, index, state.navToken);
+      };
+      $('image-error').appendChild(retry);
     }
   }
 
