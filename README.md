@@ -130,6 +130,29 @@ automatically whenever a direct load fails, so it is safe to leave on.
    time. Admins additionally get a **User sessions** report on the admin page
    with one row per sign-in session.
 
+## Performance notes
+
+The backend is tuned for a ~400-row × ~400-column Kobo sheet and ~900 photos
+per day. If it ever feels slow again, these are the levers:
+
+- **Reads go through the Sheets REST API**, not `SpreadsheetApp` — opening a
+  sheet that size costs seconds, so `getQueue` fetches only the 8 columns it
+  needs and `getRecord` fetches a single row.
+- **Drive is listed with `Drive.Files.list`** (1000 files per call) instead of
+  a `DriveApp` iterator (one round trip per file).
+- **A per-date index** (spreadsheet id, tab name, header row, `_id` → row map)
+  is cached for 6 h, so repeat requests skip the lookup entirely. The photo
+  list per folder is cached the same way. Both rebuild automatically.
+- **Saves are batched** into a single write call.
+- **Photos**: served straight from Google's CDN when the folder is link-shared,
+  otherwise through the API as a size-limited thumbnail (`IMAGE_SIZE` in
+  `js/config.js`), never the full original.
+- **The portal prefetches the next photo** while the QC user works on the
+  current one, and caches recently viewed photos in the browser.
+
+A cold first request of the day is always slower (Apps Script cold start plus
+building the caches). After that, requests are served warm.
+
 ## Updating the backend after a code change
 
 When `apps-script/Code.gs` changes in this repo, the deployed web app does NOT

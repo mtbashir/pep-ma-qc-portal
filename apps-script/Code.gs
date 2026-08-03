@@ -56,6 +56,99 @@ var CONFIG = {
 var PROPS = PropertiesService.getScriptProperties();
 
 /* ------------------------------------------------------------------ *
+ *  Fast data access
+ *
+ *  SpreadsheetApp is slow on a 400x400 sheet (it loads the whole model
+ *  on open). These helpers talk to the Sheets REST API directly with the
+ *  script's own OAuth token, so a read costs one HTTP call for exactly
+ *  the ranges asked for. No extra Apps Script service needs enabling —
+ *  the spreadsheets + external_request scopes are already granted.
+ * ------------------------------------------------------------------ */
+
+function sheetsApi(ssId, path, method, payload) {
+  var params = {
+    method: method || 'get',
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+    contentType: 'application/json',
+    muteHttpExceptions: true
+  };
+  if (payload) params.payload = JSON.stringify(payload);
+  var resp = UrlFetchApp.fetch('https://sheets.googleapis.com/v4/spreadsheets/' + ssId + path, params);
+  var code = resp.getResponseCode();
+  var text = resp.getContentText();
+  if (code >= 300) {
+    var err = new Error('Sheets API ' + code + ': ' + text.slice(0, 200));
+    err.httpCode = code;
+    throw err;
+  }
+  return JSON.parse(text);
+}
+
+/** A1 range helper: quotes a sheet name safely. */
+function quoteSheet(name) { return "'" + String(name).replace(/'/g, "''") + "'"; }
+
+/** 1-based column number -> letter(s), e.g. 1 -> A, 401 -> OK. */
+function colLetter(n) {
+  var s = '';
+  while (n > 0) { var m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - m - 1) / 26); }
+  return s;
+}
+
+function valuesBatchGet(ssId, ranges, majorDimension) {
+  if (!ranges.length) return [];
+  var qs = ranges.map(function (r) { return 'ranges=' + encodeURIComponent(r); }).join('&');
+  var path = '/values:batchGet?' + qs +
+    '&majorDimension=' + (majorDimension || 'ROWS') +
+    '&valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING';
+  return sheetsApi(ssId, path).valueRanges || [];
+}
+
+/** data = [{range, values}] — all written in a single HTTP call. */
+function valuesBatchUpdate(ssId, data) {
+  if (!data.length) return;
+  sheetsApi(ssId, '/values:batchUpdate', 'post', { valueInputOption: 'RAW', data: data });
+}
+
+/** First (or only) row/column of a batchGet result, never undefined. */
+function firstLine(valueRange) {
+  return (valueRange && valueRange.values && valueRange.values[0]) || [];
+}
+
+/* ---- chunked cache (CacheService caps a single value at 100KB) ---- */
+
+function cachePutBig(key, str, ttl) {
+  var CHUNK = 90000;
+  var n = Math.ceil(str.length / CHUNK) || 1;
+  var obj = {};
+  for (var i = 0; i < n; i++) obj[key + '|' + i] = str.substr(i * CHUNK, CHUNK);
+  obj[key + '|n'] = String(n);
+  try { CacheService.getScriptCache().putAll(obj, ttl || 21600); } catch (e) { /* cache is best-effort */ }
+}
+
+function cacheGetBig(key) {
+  var cache = CacheService.getScriptCache();
+  var n = Number(cache.get(key + '|n'));
+  if (!n) return null;
+  var keys = [];
+  for (var i = 0; i < n; i++) keys.push(key + '|' + i);
+  var got = cache.getAll(keys);
+  var out = '';
+  for (var j = 0; j < n; j++) {
+    var part = got[key + '|' + j];
+    if (part === undefined || part === null) return null; // partially evicted -> rebuild
+    out += part;
+  }
+  return out;
+}
+
+function cacheDropBig(key) {
+  var n = Number(CacheService.getScriptCache().get(key + '|n'));
+  var keys = [key + '|n'];
+  for (var i = 0; i < (n || 0); i++) keys.push(key + '|' + i);
+  try { CacheService.getScriptCache().removeAll(keys); } catch (e) { /* ignore */ }
+}
+
+/* ------------------------------------------------------------------ *
  *  HTTP entry points
  * ------------------------------------------------------------------ */
 
@@ -94,7 +187,7 @@ function route(p) {
     case 'getFilters': return getFilters(p.date);
     case 'getQueue':   return getQueue(p);
     case 'getRecord':  return getRecord(p);
-    case 'getImage':   return getImage(p.fileId);
+    case 'getImage':   return getImage(p.fileId, p.size);
     case 'saveQC':     return saveQC(p, session);
     case 'getSessionSummary': return getSessionSummary(p, session);
   }
@@ -238,41 +331,73 @@ function requireSession(token) {
  *  Drive helpers
  * ------------------------------------------------------------------ */
 
-function rootFolder() { return DriveApp.getFolderById(CONFIG.ROOT_FOLDER_ID); }
+/**
+ * Lists a Drive folder in as few calls as possible.
+ * DriveApp iterators cost a round trip per file for getName()/getId();
+ * Drive.Files.list returns 1000 files per call with just the fields we need.
+ */
+function driveList(parentId, mimeFilter) {
+  var out = [];
+  var token = null;
+  var q = "'" + parentId + "' in parents and trashed = false" +
+    (mimeFilter === 'folder' ? " and mimeType = 'application/vnd.google-apps.folder'" : '');
+  do {
+    var res = Drive.Files.list({
+      q: q,
+      fields: 'nextPageToken, files(id,name,mimeType)',
+      pageSize: 1000,
+      orderBy: 'name',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+      pageToken: token
+    });
+    out = out.concat(res.files || []);
+    token = res.nextPageToken;
+  } while (token);
+  return out;
+}
 
 function getDates() {
-  var dates = [];
-  var it = rootFolder().getFolders();
-  while (it.hasNext()) {
-    var name = it.next().getName().trim();
-    if (/^\d{4}-\d{2}-\d{2}$/.test(name)) dates.push(name);
-  }
-  dates.sort().reverse();
+  var key = 'dates3';
+  var hit = cacheGetBig(key);
+  if (hit) return { ok: true, data: JSON.parse(hit) };
+  var dates = driveList(CONFIG.ROOT_FOLDER_ID, 'folder')
+    .map(function (f) { return f.name.trim(); })
+    .filter(function (n) { return /^\d{4}-\d{2}-\d{2}$/.test(n); })
+    .sort().reverse();
+  cachePutBig(key, JSON.stringify(dates), 600); // short: new dates appear daily
   return { ok: true, data: dates };
 }
 
-function dateFolder(date) {
+function dateFolderId(date) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) throw new Error('Invalid date');
-  var it = rootFolder().getFoldersByName(date);
-  if (!it.hasNext()) throw new Error('No folder for date ' + date);
-  return it.next();
+  var key = 'datefolder3|' + date;
+  var hit = CacheService.getScriptCache().get(key);
+  if (hit) return hit;
+  var match = driveList(CONFIG.ROOT_FOLDER_ID, 'folder').filter(function (f) { return f.name.trim() === date; })[0];
+  if (!match) throw new Error('No folder for date ' + date);
+  try { CacheService.getScriptCache().put(key, match.id, 21600); } catch (e) { /* ignore */ }
+  return match.id;
 }
 
 /** Photo subfolders of a date folder, keyed by folder type ("PEP COOLER" etc). */
 function photoFolders(date) {
+  var key = 'folders3|' + date;
+  var hit = cacheGetBig(key);
+  if (hit) return JSON.parse(hit);
+
   var result = {};
-  var it = dateFolder(date).getFolders();
-  while (it.hasNext()) {
-    var f = it.next();
-    var base = f.getName().replace(date, '').trim().toUpperCase();
+  driveList(dateFolderId(date), 'folder').forEach(function (f) {
+    var base = f.name.replace(date, '').trim().toUpperCase();
     for (var type in CONFIG.FOLDER_TYPES) {
       // tolerate variations like "MT SHELF"/"MT SHELVES", double names, etc.
       if (base.indexOf(type) === 0 || type.indexOf(base) === 0 ||
           (type === 'MT SHELVES' && /^MT SHEL/.test(base))) {
-        result[type] = f.getId();
+        result[type] = f.id;
       }
     }
-  }
+  });
+  cachePutBig(key, JSON.stringify(result), 21600);
   return result;
 }
 
@@ -280,32 +405,48 @@ function getFolders(date) {
   return { ok: true, data: Object.keys(photoFolders(date)) };
 }
 
-/** Map _id -> [{fileId, name}] for the images of one folder type. Cached 20 min. */
+/** Map _id -> [{fileId, name}] for the images of one folder type. Cached 6 h. */
 function imageMap(date, folderType) {
-  var cacheKey = 'imgs|' + date + '|' + folderType;
-  var cache = CacheService.getScriptCache();
-  var hit = cache.get(cacheKey);
-  if (hit) return JSON.parse(hit);
+  var key = 'imgs3|' + date + '|' + folderType;
+  var hit = cacheGetBig(key);
+  if (hit) { try { return JSON.parse(hit); } catch (e) { /* rebuild */ } }
 
   var folders = photoFolders(date);
   if (!folders[folderType]) throw new Error('Folder "' + folderType + '" not found for ' + date);
   var map = {};
-  var it = DriveApp.getFolderById(folders[folderType]).getFiles();
-  while (it.hasNext()) {
-    var f = it.next();
-    var m = f.getName().match(/(\d{5,})\s*(?:\(\d+\))?\.[A-Za-z]+$/);
-    if (!m) continue;
-    var id = m[1];
-    (map[id] = map[id] || []).push({ fileId: f.getId(), name: f.getName() });
-  }
-  try { cache.put(cacheKey, JSON.stringify(map), 1200); } catch (e) { /* too big for cache — fine */ }
+  driveList(folders[folderType]).forEach(function (f) {
+    var m = f.name.match(/(\d{5,})\s*(?:\(\d+\))?\.[A-Za-z]+$/);
+    if (!m) return;
+    (map[m[1]] = map[m[1]] || []).push({ fileId: f.id, name: f.name });
+  });
+  cachePutBig(key, JSON.stringify(map), 21600);
   return map;
 }
 
-function getImage(fileId) {
+/**
+ * Returns a photo as base64. Uses Drive's pre-rendered thumbnail at the
+ * requested size (typically ~10x smaller than the original) and only falls
+ * back to the full-resolution file if no thumbnail is available.
+ */
+function getImage(fileId, size) {
   if (!fileId) throw new Error('fileId required');
+  size = Math.min(Math.max(Number(size) || 1600, 200), 4000);
+  try {
+    var meta = Drive.Files.get(fileId, { fields: 'thumbnailLink', supportsAllDrives: true });
+    if (meta && meta.thumbnailLink) {
+      var url = meta.thumbnailLink.replace(/=s\d+([^\/]*)$/, '=s' + size);
+      var resp = UrlFetchApp.fetch(url, {
+        headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+        muteHttpExceptions: true
+      });
+      if (resp.getResponseCode() === 200) {
+        var b = resp.getBlob();
+        return { ok: true, data: { mime: b.getContentType(), base64: Utilities.base64Encode(b.getBytes()), thumb: true } };
+      }
+    }
+  } catch (e) { /* fall through to the original file */ }
   var blob = DriveApp.getFileById(fileId).getBlob();
-  return { ok: true, data: { mime: blob.getContentType(), base64: Utilities.base64Encode(blob.getBytes()) } };
+  return { ok: true, data: { mime: blob.getContentType(), base64: Utilities.base64Encode(blob.getBytes()), thumb: false } };
 }
 
 /* ------------------------------------------------------------------ *
@@ -322,9 +463,9 @@ function outputFolder() {
 function ensureQcSheet(date) {
   var propKey = 'QC_' + date;
   var cached = PROPS.getProperty(propKey);
-  if (cached) {
-    try { SpreadsheetApp.openById(cached); return cached; } catch (e) { PROPS.deleteProperty(propKey); }
-  }
+  // trust the stored id — validating it with an open() costs seconds on every
+  // request; dateIndex() busts the property if the file has really gone away
+  if (cached) return cached;
 
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
@@ -339,18 +480,15 @@ function ensureQcSheet(date) {
       ssId = existing.next().getId();
     } else {
       // find the Kobo xlsx inside the date folder
-      var src = null;
-      var it = dateFolder(date).getFiles();
-      while (it.hasNext()) {
-        var f = it.next();
-        if (f.getName().indexOf(CONFIG.KOBO_FILE_PREFIX) === 0) { src = f; break; }
-      }
+      var src = driveList(dateFolderId(date)).filter(function (f) {
+        return f.name.indexOf(CONFIG.KOBO_FILE_PREFIX) === 0;
+      })[0];
       if (!src) throw new Error('No "' + CONFIG.KOBO_FILE_PREFIX + '" excel file found in folder ' + date);
 
       // copy + convert xlsx -> Google Sheet (Drive advanced service, shared-drive aware)
       var copy = Drive.Files.copy(
         { name: name, mimeType: 'application/vnd.google-apps.spreadsheet', parents: [outputFolder().getId()] },
-        src.getId(),
+        src.id,
         { supportsAllDrives: true }
       );
       ssId = copy.id;
@@ -383,14 +521,65 @@ function appendQcColumns(ssId) {
   }
 }
 
-/** Cached header row + id column values of the QC sheet for a date. */
-function qcSheetInfo(date) {
+/**
+ * Cached per-date index of the QC sheet: spreadsheet id, tab name, header row
+ * and an _id -> row-number map. Built with 3 REST calls, then served from
+ * cache for 6 h — this is what removes the per-request sheet scan.
+ */
+function dateIndex(date, forceRefresh) {
+  var key = 'idx3|' + date;
+  if (!forceRefresh) {
+    var hit = cacheGetBig(key);
+    if (hit) { try { return JSON.parse(hit); } catch (e) { /* rebuild */ } }
+  }
+
   var ssId = ensureQcSheet(date);
-  var sh = SpreadsheetApp.openById(ssId).getSheets()[0];
-  var lastCol = sh.getLastColumn();
-  var lastRow = sh.getLastRow();
-  var headers = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(function (h) { return String(h); });
-  return { ssId: ssId, sheet: sh, headers: headers, lastRow: lastRow, lastCol: lastCol };
+  var meta;
+  try {
+    meta = sheetsApi(ssId, '?fields=sheets.properties(title,gridProperties(rowCount,columnCount))');
+  } catch (e) {
+    if (e.httpCode === 404) {           // sheet was deleted/moved — rebuild it
+      PROPS.deleteProperty('QC_' + date);
+      ssId = ensureQcSheet(date);
+      meta = sheetsApi(ssId, '?fields=sheets.properties(title,gridProperties(rowCount,columnCount))');
+    } else { throw e; }
+  }
+
+  var props = meta.sheets[0].properties;
+  var sheetName = props.title;
+  var q = quoteSheet(sheetName);
+
+  var headers = firstLine(valuesBatchGet(ssId, [q + '!1:1'])[0]).map(String);
+  while (headers.length && headers[headers.length - 1] === '') headers.pop();
+
+  var idCol = colLetter(headerIndex(headers, CONFIG.ID_HEADER) + 1);
+  var ids = firstLine(valuesBatchGet(ssId, [q + '!' + idCol + '2:' + idCol + props.gridProperties.rowCount], 'COLUMNS')[0]);
+
+  var idToRow = {}, lastRow = 1;
+  ids.forEach(function (v, i) {
+    var id = String(v).replace(/\.0$/, '').trim();
+    if (id) { idToRow[id] = i + 2; lastRow = i + 2; }
+  });
+
+  var idx = { ssId: ssId, sheetName: sheetName, headers: headers, idToRow: idToRow, lastRow: lastRow };
+  cachePutBig(key, JSON.stringify(idx), 21600);
+  return idx;
+}
+
+/** A1 range for a whole data column (row 2 .. last row) of the QC sheet. */
+function colRange(idx, headerName) {
+  var c = colLetter(headerIndex(idx.headers, headerName) + 1);
+  return quoteSheet(idx.sheetName) + '!' + c + '2:' + c + idx.lastRow;
+}
+
+/** Row number for an _id, refreshing the index once if it looks stale. */
+function rowForId(idx, id, date) {
+  var row = idx.idToRow[String(id)];
+  if (row) return { idx: idx, row: row };
+  var fresh = dateIndex(date, true);
+  row = fresh.idToRow[String(id)];
+  if (!row) throw new Error('Survey _id ' + id + ' not found in QC sheet');
+  return { idx: fresh, row: row };
 }
 
 function headerIndex(headers, name) {
@@ -425,22 +614,25 @@ function measureIndexes(headers, folderType) {
  * ------------------------------------------------------------------ */
 
 function getFilters(date) {
-  var info = qcSheetInfo(date);
-  var n = info.lastRow - 1;
-  if (n < 1) return { ok: true, data: { cities: [], auditors: [], channels: [] } };
+  var idx = dateIndex(date);
+  if (idx.lastRow < 2) return { ok: true, data: { cities: [], auditors: [], channels: [] } };
 
-  function uniqueCol(headerName) {
-    var col = headerIndex(info.headers, headerName) + 1;
-    var vals = info.sheet.getRange(2, col, n, 1).getValues();
+  // one HTTP call for the three columns instead of a full-sheet scan
+  var res = valuesBatchGet(idx.ssId, [
+    colRange(idx, CONFIG.FILTERS.city),
+    colRange(idx, CONFIG.FILTERS.auditor),
+    colRange(idx, CONFIG.FILTERS.channel)
+  ], 'COLUMNS');
+
+  function uniq(i) {
     var seen = {};
-    vals.forEach(function (r) { var v = String(r[0]).trim(); if (v && v !== 'null') seen[v] = 1; });
+    firstLine(res[i]).forEach(function (v) {
+      var s = String(v).trim();
+      if (s && s !== 'null') seen[s] = 1;
+    });
     return Object.keys(seen).sort();
   }
-  return { ok: true, data: {
-    cities:   uniqueCol(CONFIG.FILTERS.city),
-    auditors: uniqueCol(CONFIG.FILTERS.auditor),
-    channels: uniqueCol(CONFIG.FILTERS.channel)
-  } };
+  return { ok: true, data: { cities: uniq(0), auditors: uniq(1), channels: uniq(2) } };
 }
 
 /**
@@ -449,42 +641,41 @@ function getFilters(date) {
  */
 function getQueue(p) {
   var date = p.date, folderType = p.folderType;
-  var info = qcSheetInfo(date);
+  var idx = dateIndex(date);
   var imgs = imageMap(date, folderType);
-  var n = info.lastRow - 1;
-  if (n < 1) return { ok: true, data: { items: [], unmatchedImages: 0 } };
+  if (idx.lastRow < 2) return { ok: true, data: { items: [], unmatchedImages: 0 } };
 
-  var cId      = headerIndex(info.headers, CONFIG.ID_HEADER);
-  var cCity    = headerIndex(info.headers, CONFIG.FILTERS.city);
-  var cAuditor = headerIndex(info.headers, CONFIG.FILTERS.auditor);
-  var cChannel = headerIndex(info.headers, CONFIG.FILTERS.channel);
-  var cStoreId = headerIndex(info.headers, 'Select Store ID');
-  var cStore   = headerIndex(info.headers, 'Select Store Name');
-  var cStatus  = headerIndex(info.headers, qcColName(folderType, 'Status'));
-  var cUser    = headerIndex(info.headers, qcColName(folderType, 'User'));
+  // 8 columns in one call, instead of every cell of a 400 x 400 sheet
+  var wanted = [
+    CONFIG.ID_HEADER, CONFIG.FILTERS.city, CONFIG.FILTERS.auditor,
+    'Select Store ID', 'Select Store Name', CONFIG.FILTERS.channel,
+    qcColName(folderType, 'Status'), qcColName(folderType, 'User')
+  ];
+  var res = valuesBatchGet(idx.ssId, wanted.map(function (h) { return colRange(idx, h); }), 'COLUMNS');
+  var cols = res.map(firstLine);
+  function cell(c, r) { var v = cols[c][r]; return v === undefined || v === null ? '' : String(v); }
 
-  var data = info.sheet.getRange(2, 1, n, info.lastCol).getValues();
   var items = [];
   var matchedIds = {};
-  data.forEach(function (row) {
-    var id = String(row[cId]).replace(/\.0$/, '').trim();
-    if (!id || !imgs[id]) return;
-    if (p.city    && String(row[cCity]).trim()    !== p.city)    return;
-    if (p.auditor && String(row[cAuditor]).trim() !== p.auditor) return;
-    if (p.channel && String(row[cChannel]).trim() !== p.channel) return;
+  for (var r = 0; r < cols[0].length; r++) {
+    var id = cell(0, r).replace(/\.0$/, '').trim();
+    if (!id || !imgs[id]) continue;
+    if (p.city    && cell(1, r).trim() !== p.city)    continue;
+    if (p.auditor && cell(2, r).trim() !== p.auditor) continue;
+    if (p.channel && cell(5, r).trim() !== p.channel) continue;
     matchedIds[id] = 1;
     items.push({
       id: id,
-      city: String(row[cCity]),
-      auditor: String(row[cAuditor]),
-      storeId: String(row[cStoreId]),
-      storeName: String(row[cStore]),
-      channel: String(row[cChannel]),
-      qcStatus: String(row[cStatus] || ''),
-      qcUser: String(row[cUser] || ''),
+      city: cell(1, r),
+      auditor: cell(2, r),
+      storeId: cell(3, r),
+      storeName: cell(4, r),
+      channel: cell(5, r),
+      qcStatus: cell(6, r),
+      qcUser: cell(7, r),
       imageCount: imgs[id].length
     });
-  });
+  }
   items.sort(function (a, b) { return Number(a.id) - Number(b.id); });
 
   var unmatched = Object.keys(imgs).filter(function (id) { return !matchedIds[id]; }).length;
@@ -494,23 +685,23 @@ function getQueue(p) {
 /** Full detail for one survey id: context, editable measures, image references. */
 function getRecord(p) {
   var date = p.date, folderType = p.folderType, id = String(p.id);
-  var info = qcSheetInfo(date);
-  var rowNum = findRowById(info, id);
-  var row = info.sheet.getRange(rowNum, 1, 1, info.lastCol).getValues()[0];
+  var found = rowForId(dateIndex(date), id, date);
+  var idx = found.idx, rowNum = found.row;
+  var row = readRow(idx, rowNum);
 
   var context = CONFIG.CONTEXT_HEADERS.map(function (h) {
-    var i = info.headers.indexOf(h);
+    var i = idx.headers.indexOf(h);
     return { label: h, value: i === -1 ? '' : fmtValue(row[i]) };
   });
   context.unshift({ label: '_id', value: id });
 
-  var measures = measureIndexes(info.headers, folderType).map(function (i) {
-    var header = info.headers[i];
+  var measures = measureIndexes(idx.headers, folderType).map(function (i) {
+    var header = idx.headers[i];
     var readOnly = header.charAt(0) === '_' || /_URL$/.test(header);
     // options for select-type questions come from sibling "Header/Option" columns
     var options = [];
     if (!readOnly && header.indexOf('/') === -1) {
-      info.headers.forEach(function (h) {
+      idx.headers.forEach(function (h) {
         if (h.indexOf(header + '/') === 0) options.push(h.slice(header.length + 1));
       });
     }
@@ -525,7 +716,7 @@ function getRecord(p) {
 
   var qc = {};
   CONFIG.QC_FIELDS.forEach(function (f) {
-    var i = info.headers.indexOf(qcColName(folderType, f));
+    var i = idx.headers.indexOf(qcColName(folderType, f));
     if (i !== -1) qc[f.toLowerCase()] = fmtValue(row[i]);
   });
 
@@ -536,13 +727,12 @@ function getRecord(p) {
   return { ok: true, data: { id: id, rowNum: rowNum, context: context, measures: measures, images: imgs, qc: qc } };
 }
 
-function findRowById(info, id) {
-  var cId = headerIndex(info.headers, CONFIG.ID_HEADER) + 1;
-  var vals = info.sheet.getRange(2, cId, info.lastRow - 1, 1).getValues();
-  for (var i = 0; i < vals.length; i++) {
-    if (String(vals[i][0]).replace(/\.0$/, '').trim() === id) return i + 2;
-  }
-  throw new Error('Survey _id ' + id + ' not found in QC sheet');
+/** One sheet row, padded to the header length. */
+function readRow(idx, rowNum) {
+  var range = quoteSheet(idx.sheetName) + '!A' + rowNum + ':' + colLetter(idx.headers.length) + rowNum;
+  var row = firstLine(valuesBatchGet(idx.ssId, [range])[0]);
+  while (row.length < idx.headers.length) row.push('');
+  return row;
 }
 
 function fmtValue(v) {
@@ -565,32 +755,37 @@ function saveQC(p, session) {
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
-    var info = qcSheetInfo(p.date);
-    var rowNum = findRowById(info, String(p.id));
-    var row = info.sheet.getRange(rowNum, 1, 1, info.lastCol).getValues()[0];
+    var found = rowForId(dateIndex(p.date), String(p.id), p.date);
+    var idx = found.idx, rowNum = found.row;
+    var row = readRow(idx, rowNum);
+    var sheetQ = quoteSheet(idx.sheetName);
 
-    var allowed = measureIndexes(info.headers, p.folderType);
+    var allowed = measureIndexes(idx.headers, p.folderType);
     var changes = p.changes || {};
     var applied = {};
+    var writes = [];   // collected, then sent as ONE batch update
+    function queueWrite(colIdx0, value) {
+      writes.push({ range: sheetQ + '!' + colLetter(colIdx0 + 1) + rowNum, values: [[value]] });
+    }
 
     Object.keys(changes).forEach(function (header) {
-      var i = info.headers.indexOf(header);
+      var i = idx.headers.indexOf(header);
       if (i === -1 || allowed.indexOf(i) === -1) return; // only columns of this folder type
       var oldVal = fmtValue(row[i]);
       var newVal = changes[header];
       if (String(newVal) === oldVal) return;
 
       var write = (newVal !== '' && !isNaN(Number(newVal)) && String(newVal).trim() !== '') ? Number(newVal) : newVal;
-      info.sheet.getRange(rowNum, i + 1).setValue(write);
+      queueWrite(i, write);
       applied[header] = { from: oldVal, to: String(newVal) };
 
       // keep the 0/1 dummy option columns in sync when a parent select changes
       if (header.indexOf('/') === -1) {
-        info.headers.forEach(function (h, j) {
+        idx.headers.forEach(function (h, j) {
           if (h.indexOf(header + '/') === 0) {
             var opt = h.slice(header.length + 1);
             var on = String(newVal) === opt || String(newVal).indexOf(opt) !== -1;
-            info.sheet.getRange(rowNum, j + 1).setValue(on ? 1 : 0);
+            queueWrite(j, on ? 1 : 0);
           }
         });
       }
@@ -606,9 +801,11 @@ function saveQC(p, session) {
       'Remarks': p.remarks || ''
     };
     CONFIG.QC_FIELDS.forEach(function (f) {
-      var i = info.headers.indexOf(qcColName(p.folderType, f));
-      if (i !== -1) info.sheet.getRange(rowNum, i + 1).setValue(qcVals[f]);
+      var i = idx.headers.indexOf(qcColName(p.folderType, f));
+      if (i !== -1) queueWrite(i, qcVals[f]);
     });
+
+    valuesBatchUpdate(idx.ssId, writes);
 
     qcLogSheet().appendRow([
       new Date(), p.date, p.folderType, String(p.id), session.username,
@@ -777,35 +974,36 @@ function setActive(p) {
 
 /** QC progress per folder type for a date: total images, matched rows, done, flagged. */
 function getProgress(date) {
-  var info = qcSheetInfo(date);
-  var folders = photoFolders(date);
-  var n = info.lastRow - 1;
-  var cId = headerIndex(info.headers, CONFIG.ID_HEADER);
-  var ids = n > 0 ? info.sheet.getRange(2, cId + 1, n, 1).getValues().map(function (r) { return String(r[0]).replace(/\.0$/, '').trim(); }) : [];
+  var idx = dateIndex(date);
+  var folders = Object.keys(photoFolders(date));
 
-  var result = [];
-  Object.keys(folders).forEach(function (type) {
+  // ids come from the cached index; statuses for every folder type in one call
+  var ids = [];
+  Object.keys(idx.idToRow).forEach(function (id) { ids[idx.idToRow[id] - 2] = id; });
+  var statusCols = folders.map(function (type) { return colRange(idx, qcColName(type, 'Status')); });
+  var res = idx.lastRow > 1 ? valuesBatchGet(idx.ssId, statusCols, 'COLUMNS') : [];
+
+  var result = folders.map(function (type, fi) {
     var imgs = imageMap(date, type);
-    var cStatus = info.headers.indexOf(qcColName(type, 'Status'));
-    var statuses = (cStatus !== -1 && n > 0) ? info.sheet.getRange(2, cStatus + 1, n, 1).getValues() : [];
+    var statuses = firstLine(res[fi]);
     var done = 0, flagged = 0, matched = 0;
     ids.forEach(function (id, i) {
-      if (!imgs[id]) return;
+      if (!id || !imgs[id]) return;
       matched++;
-      var s = statuses[i] ? String(statuses[i][0]) : '';
+      var s = String(statuses[i] === undefined ? '' : statuses[i]);
       if (s === 'DONE') done++;
       if (s === 'FLAGGED') flagged++;
     });
-    result.push({
+    return {
       folderType: type,
       images: Object.keys(imgs).length,
       matched: matched,
       done: done,
       flagged: flagged,
       pending: matched - done - flagged
-    });
+    };
   });
-  return { ok: true, data: { date: date, sheetUrl: 'https://docs.google.com/spreadsheets/d/' + info.ssId, progress: result } };
+  return { ok: true, data: { date: date, sheetUrl: 'https://docs.google.com/spreadsheets/d/' + idx.ssId, progress: result } };
 }
 
 /** Exports "QC RD <date>" as xlsx (base64) so the browser can download it. */

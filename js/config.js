@@ -12,5 +12,7 @@
 window.QC_CONFIG = {
   API_URL: 'https://script.google.com/macros/s/AKfycbz0B_oL-cA4gztvs0FGJdP1jF45w0giRHtqDU6aocbx39NRRk_Hn8g9TD_N6_ptdgMp/exec',
   DIRECT_IMAGES: true,
-  IMAGE_SIZE: 2400
+  // Longest edge in pixels used when a photo comes through the API. 1600 is
+  // about native size for these audit photos; raising it slows QC down.
+  IMAGE_SIZE: 1600
 };

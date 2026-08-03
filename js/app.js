@@ -10,8 +10,14 @@
     qcStart: null,         // ISO time when current record was shown
     imageIndex: 0,
     filters: { date: '', folderType: '', city: '', auditor: '', channel: '' },
-    session: { photos: {}, changes: 0, flagged: 0 }   // local live counters
+    session: { photos: {}, changes: 0, flagged: 0 },  // local live counters
+    recordCache: {},      // key -> getRecord payload (prefetched)
+    imageCache: {},       // fileId -> resolved img src
+    imageOrder: [],       // fileIds in load order, for eviction
+    navToken: 0           // guards against out-of-order navigation
   };
+
+  var IMAGE_CACHE_MAX = 12;
 
   /* ================= boot / auth ================= */
 
@@ -181,6 +187,7 @@
       city: $('f-city').value, auditor: $('f-auditor').value, channel: $('f-channel').value
     };
     if (!state.filters.date || !state.filters.folderType) return;
+    state.recordCache = {};   // different date/folder -> different records
     $('btn-load').disabled = true;
     toast('Building QC queue…');
     try {
@@ -240,8 +247,38 @@
     goTo(i);
   }
 
+  function recordKey(id) {
+    return state.filters.date + '|' + state.filters.folderType + '|' + id;
+  }
+
+  /** Fetches a record, serving it from the prefetch cache when possible. */
+  function fetchRecord(id, useCache) {
+    var key = recordKey(id);
+    if (useCache !== false && state.recordCache[key]) return Promise.resolve(state.recordCache[key]);
+    return window.QCApi.call('getRecord', {
+      date: state.filters.date, folderType: state.filters.folderType, id: id
+    }).then(function (rec) {
+      state.recordCache[key] = rec;
+      return rec;
+    });
+  }
+
+  /**
+   * Loads the next queue item (and its photo) in the background while the
+   * user is working on the current one, so navigation feels instant.
+   */
+  function prefetch(i) {
+    if (i < 0 || i >= state.queue.length) return;
+    var id = state.queue[i].id;
+    if (state.recordCache[recordKey(id)]) return;
+    fetchRecord(id)
+      .then(function (rec) { if (rec.images && rec.images[0]) return resolveImageSrc(rec.images[0]); })
+      .catch(function () { /* prefetch is best-effort */ });
+  }
+
   async function goTo(i) {
     if (i < 0 || i >= state.queue.length) return;
+    var token = ++state.navToken;
     state.pos = i;
     $('queue-jump').value = i;
     $('queue-pos').textContent = (i + 1) + ' / ' + state.queue.length;
@@ -251,14 +288,14 @@
     $('measures-table').innerHTML = '';
     showImageMsg('Loading photo…');
     try {
-      var rec = await window.QCApi.call('getRecord', {
-        date: state.filters.date, folderType: state.filters.folderType, id: state.queue[i].id
-      });
+      var rec = await fetchRecord(state.queue[i].id);
+      if (token !== state.navToken) return;   // user already moved on
       state.record = rec;
       state.qcStart = new Date().toISOString();
       state.imageIndex = 0;
       renderRecord(rec);
-      loadImage(rec, 0);
+      loadImage(rec, 0, token);
+      prefetch(i + 1);
     } catch (e) { toast(e.message, 'err'); if (e.auth) showLogin(); }
   }
 
@@ -375,7 +412,45 @@
     $('image-error').classList.add('hidden');
   }
 
-  function loadImage(rec, index) {
+  /** Loads a URL into a detached Image; resolves with the url or rejects. */
+  function probeUrl(url) {
+    return new Promise(function (resolve, reject) {
+      var probe = new Image();
+      probe.onload = function () { resolve(url); };
+      probe.onerror = reject;
+      probe.src = url;
+    });
+  }
+
+  function cacheImageSrc(fileId, src) {
+    if (!state.imageCache[fileId]) state.imageOrder.push(fileId);
+    state.imageCache[fileId] = src;
+    while (state.imageOrder.length > IMAGE_CACHE_MAX) {
+      delete state.imageCache[state.imageOrder.shift()];
+    }
+    return src;
+  }
+
+  /**
+   * Resolves a displayable src for a photo: cache -> Google direct CDN ->
+   * API (which returns a size-limited thumbnail). Cached per file id so
+   * revisiting a photo is instant.
+   */
+  async function resolveImageSrc(image) {
+    if (!image) return null;
+    if (image.directUrl && image.directUrl.indexOf('data:') === 0) return image.directUrl;
+    if (state.imageCache[image.fileId]) return state.imageCache[image.fileId];
+
+    var size = window.QC_CONFIG.IMAGE_SIZE || 1600;
+    if (window.QC_CONFIG.DIRECT_IMAGES && image.directUrl) {
+      try { return cacheImageSrc(image.fileId, await probeUrl(image.directUrl + '=s' + size)); }
+      catch (e) { /* not shared publicly — fall back to the API */ }
+    }
+    var d = await window.QCApi.call('getImage', { fileId: image.fileId, size: size });
+    return cacheImageSrc(image.fileId, 'data:' + d.mime + ';base64,' + d.base64);
+  }
+
+  async function loadImage(rec, index, token) {
     var thumbs = $('image-thumbs');
     thumbs.classList.toggle('hidden', rec.images.length < 2);
     if (rec.images.length > 1) {
@@ -384,7 +459,7 @@
         var t = document.createElement('img');
         t.src = im.directUrl.indexOf('data:') === 0 ? im.directUrl : im.directUrl + '=s120';
         t.className = j === index ? 'active' : '';
-        t.onclick = function () { loadImage(rec, j); };
+        t.onclick = function () { loadImage(rec, j, token); };
         thumbs.appendChild(t);
       });
     }
@@ -392,32 +467,20 @@
     var image = rec.images[index];
     if (!image) { showImageMsg('No photo found for this survey in the selected folder.', true); return; }
     $('image-name').textContent = image.name;
-    showImageMsg('Loading photo…');
+    if (!state.imageCache[image.fileId]) showImageMsg('Loading photo…');
 
-    var triedApi = false;
     img.onload = function () {
       view.natW = img.naturalWidth; view.natH = img.naturalHeight; view.rotation = 0;
       fitImage(); hideImageMsg();
     };
-    img.onerror = function () {
-      if (!triedApi && image.fileId !== 'demo') {
-        triedApi = true;
-        showImageMsg('Loading photo via API…');
-        window.QCApi.call('getImage', { fileId: image.fileId }).then(function (d) {
-          img.src = 'data:' + d.mime + ';base64,' + d.base64;
-        }).catch(function (e) {
-          showImageMsg('Could not load photo: ' + e.message, true);
-        });
-      } else {
-        showImageMsg('Could not load photo.', true);
-      }
-    };
-    if (image.directUrl.indexOf('data:') === 0) {
-      img.src = image.directUrl;
-    } else if (window.QC_CONFIG.DIRECT_IMAGES) {
-      img.src = image.directUrl + '=s' + (window.QC_CONFIG.IMAGE_SIZE || 2400);
-    } else {
-      img.onerror(); // go straight to API
+    img.onerror = function () { showImageMsg('Could not load photo.', true); };
+
+    try {
+      var src = await resolveImageSrc(image);
+      if (token !== undefined && token !== state.navToken) return;  // stale
+      img.src = src;
+    } catch (e) {
+      showImageMsg('Could not load photo: ' + e.message, true);
     }
   }
 
@@ -496,6 +559,7 @@
         remarks: remarks || ''
       };
       var res = await window.QCApi.call('saveQC', payload);
+      delete state.recordCache[recordKey(payload.id)];   // QC status changed
       state.session.photos[payload.date + '|' + payload.folderType + '|' + payload.id] = 1;
       state.session.changes += res.changed || 0;
       if (res.status === 'FLAGGED') state.session.flagged++;
