@@ -487,7 +487,16 @@
       try { return cacheImageSrc(image.fileId, await probeUrl(image.directUrl + '=s' + size)); }
       catch (e) { /* not shared publicly — fall back to the API */ }
     }
-    var d = await window.QCApi.call('getImage', { fileId: image.fileId, size: size });
+    // Apps Script occasionally answers a request with a transient 404, so one
+    // retry here saves the user from a spurious "could not load photo"
+    var d;
+    try {
+      d = await window.QCApi.call('getImage', { fileId: image.fileId, size: size });
+    } catch (e) {
+      if (e.auth) throw e;
+      await new Promise(function (r) { setTimeout(r, 600); });
+      d = await window.QCApi.call('getImage', { fileId: image.fileId, size: size });
+    }
     return cacheImageSrc(image.fileId, 'data:' + d.mime + ';base64,' + d.base64);
   }
 
@@ -521,6 +530,9 @@
       if (token !== undefined && token !== state.navToken) return;  // stale
       img.src = src;
     } catch (e) {
+      // never let a failure from a photo the user has already left behind
+      // paint an error over the photo they are looking at now
+      if (token !== undefined && token !== state.navToken) return;
       showImageMsg('Could not load photo: ' + e.message, true);
     }
   }
