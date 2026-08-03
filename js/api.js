@@ -112,9 +112,22 @@
       case 'getFolders': return ['PEP COOLER', 'KO COOLER', 'OTHERS COOLER', 'STORES PHOTOS', 'MT SHELVES'];
       case 'getFilters': return { cities: ['5.GJW', '6.LHR'], auditors: ['DEMO AUDITOR', 'DEMO AUDITOR 2'], channels: ['1.GT', '2.LMT'] };
       case 'getQueue':
-        return { items: DEMO_QUEUE.filter(function (q) {
+        var items = DEMO_QUEUE.filter(function (q) {
           return (!p.city || q.city === p.city) && (!p.auditor || q.auditor === p.auditor) && (!p.channel || q.channel === p.channel);
-        }), unmatchedImages: 0 };
+        }).map(function (q) {
+          return Object.assign({}, q, {
+            shopStatus: 'Completed Interview',
+            values: DEMO_MEASURES.map(function (m) { return q.vals && q.vals[m[0]] !== undefined ? q.vals[m[0]] : m[1]; }),
+            images: [{ fileId: 'demo-' + q.id, name: 'DEMO_' + q.id + '.jpg' }]
+          });
+        });
+        return {
+          items: items,
+          schema: DEMO_MEASURES.map(function (m) {
+            return { header: m[0], readOnly: false, isOption: m[0].indexOf('/') !== -1, options: m[2] || [] };
+          }),
+          unmatchedImages: 0
+        };
       case 'getRecord':
         var q = DEMO_QUEUE.filter(function (x) { return x.id === String(p.id); })[0] || DEMO_QUEUE[0];
         return {

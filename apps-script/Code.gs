@@ -637,6 +637,25 @@ function headerIndex(headers, name) {
   return i; // 0-based
 }
 
+/**
+ * Describes the editable measures of a folder type once (header, options,
+ * read-only), so the queue can ship values without repeating the metadata
+ * for every photo.
+ */
+function measureSchema(headers, folderType) {
+  return measureIndexes(headers, folderType).map(function (i) {
+    var header = headers[i];
+    var readOnly = header.charAt(0) === '_' || /_URL$/.test(header);
+    var options = [];
+    if (!readOnly && header.indexOf('/') === -1) {
+      headers.forEach(function (h) {
+        if (h.indexOf(header + '/') === 0) options.push(h.slice(header.length + 1));
+      });
+    }
+    return { header: header, readOnly: readOnly, isOption: header.indexOf('/') !== -1, options: options };
+  });
+}
+
 /** 0-based column indexes shown for a folder type. */
 function measureIndexes(headers, folderType) {
   var spec = CONFIG.FOLDER_TYPES[folderType];
@@ -708,18 +727,32 @@ function getQueue(p) {
   var imgs = imageMap(date, folderType);
   if (idx.lastRow < 2) return { ok: true, data: { items: [], unmatchedImages: 0 } };
 
-  // 8 columns in one call, instead of every cell of a 400 x 400 sheet
+  // Fixed columns, plus (when the portal asks for them) every measure column.
+  // Shipping the values with the queue means the portal needs NO per-photo
+  // request afterwards — the biggest win available, because each Apps Script
+  // round trip costs seconds and occasionally stalls badly.
   var wanted = [
     CONFIG.ID_HEADER, CONFIG.FILTERS.city, CONFIG.FILTERS.auditor,
     'Select Store ID', 'Select Store Name', CONFIG.FILTERS.channel,
-    qcColName(folderType, 'Status'), qcColName(folderType, 'User')
+    qcColName(folderType, 'Status'), qcColName(folderType, 'User'),
+    qcColName(folderType, 'End'), '1.9: Shop Status Code'
   ];
-  var res = valuesBatchGet(idx.ssId, wanted.map(function (h) { return colRange(idx, h); }), 'COLUMNS');
-  var cols = res.map(firstLine);
-  function cell(c, r) { var v = cols[c][r]; return v === undefined || v === null ? '' : String(v); }
+  var withValues = p.includeValues !== false;
+  var schema = withValues ? measureSchema(idx.headers, folderType) : [];
+  var mIdx = withValues ? measureIndexes(idx.headers, folderType) : [];
+
+  var ranges = wanted.map(function (h) { return colRange(idx, h); })
+    .concat(mIdx.map(function (i) {
+      var c = colLetter(i + 1);
+      return quoteSheet(idx.sheetName) + '!' + c + '2:' + c + idx.lastRow;
+    }));
+
+  var cols = valuesBatchGet(idx.ssId, ranges, 'COLUMNS').map(firstLine);
+  function cell(c, r) { var v = cols[c] && cols[c][r]; return v === undefined || v === null ? '' : String(v); }
 
   var items = [];
   var matchedIds = {};
+  var base = wanted.length;
   for (var r = 0; r < cols[0].length; r++) {
     var id = cell(0, r).replace(/\.0$/, '').trim();
     if (!id || !imgs[id]) continue;
@@ -727,7 +760,8 @@ function getQueue(p) {
     if (p.auditor && cell(2, r).trim() !== p.auditor) continue;
     if (p.channel && cell(5, r).trim() !== p.channel) continue;
     matchedIds[id] = 1;
-    items.push({
+
+    var item = {
       id: id,
       city: cell(1, r),
       auditor: cell(2, r),
@@ -736,13 +770,20 @@ function getQueue(p) {
       channel: cell(5, r),
       qcStatus: cell(6, r),
       qcUser: cell(7, r),
+      qcEnd: cell(8, r),
+      shopStatus: cell(9, r),
       imageCount: imgs[id].length
-    });
+    };
+    if (withValues) {
+      item.values = mIdx.map(function (_, k) { return cell(base + k, r); });
+      item.images = imgs[id];   // [{fileId, name}]
+    }
+    items.push(item);
   }
   items.sort(function (a, b) { return Number(a.id) - Number(b.id); });
 
   var unmatched = Object.keys(imgs).filter(function (id) { return !matchedIds[id]; }).length;
-  return { ok: true, data: { items: items, unmatchedImages: unmatched } };
+  return { ok: true, data: { items: items, schema: schema, unmatchedImages: unmatched } };
 }
 
 /** Full detail for one survey id: context, editable measures, image references. */
@@ -758,22 +799,14 @@ function getRecord(p) {
   });
   context.unshift({ label: '_id', value: id });
 
-  var measures = measureIndexes(idx.headers, folderType).map(function (i) {
-    var header = idx.headers[i];
-    var readOnly = header.charAt(0) === '_' || /_URL$/.test(header);
-    // options for select-type questions come from sibling "Header/Option" columns
-    var options = [];
-    if (!readOnly && header.indexOf('/') === -1) {
-      idx.headers.forEach(function (h) {
-        if (h.indexOf(header + '/') === 0) options.push(h.slice(header.length + 1));
-      });
-    }
+  var mIdx = measureIndexes(idx.headers, folderType);
+  var measures = measureSchema(idx.headers, folderType).map(function (s, k) {
     return {
-      header: header,
-      value: fmtValue(row[i]),
-      readOnly: readOnly,
-      isOption: header.indexOf('/') !== -1,
-      options: options
+      header: s.header,
+      value: fmtValue(row[mIdx[k]]),
+      readOnly: s.readOnly,
+      isOption: s.isOption,
+      options: s.options
     };
   });
 

@@ -192,8 +192,10 @@
     $('btn-load').disabled = true;
     toast('Building QC queue…');
     try {
-      var data = await window.QCApi.call('getQueue', state.filters);
+      var data = await window.QCApi.call('getQueue',
+        Object.assign({ includeValues: true }, state.filters));
       state.queue = data.items;
+      state.schema = data.schema || null;
       $('queue-bar').classList.remove('hidden');
       var stats = state.queue.length + ' photos';
       var done = state.queue.filter(function (q) { return q.qcStatus === 'DONE'; }).length;
@@ -252,10 +254,48 @@
     return state.filters.date + '|' + state.filters.folderType + '|' + id;
   }
 
-  /** Fetches a record, serving it from the prefetch cache when possible. */
+  var CONTEXT_FIELDS = [
+    ['Select City Name', 'city'], ['Select Auditor Name', 'auditor'],
+    ['Select Store ID', 'storeId'], ['Select Store Name', 'storeName'],
+    ['Channel Type', 'channel'], ['1.9: Shop Status Code', 'shopStatus']
+  ];
+
+  /**
+   * Builds the record straight from the queue payload — the queue already
+   * carries every measure value and photo id, so moving between photos needs
+   * no server call at all.
+   */
+  function buildRecord(item) {
+    if (!state.schema || !item.values) return null;
+    var context = [{ label: '_id', value: item.id }];
+    CONTEXT_FIELDS.forEach(function (f) {
+      context.push({ label: f[0], value: item[f[1]] || '' });
+    });
+    return {
+      id: item.id,
+      context: context,
+      measures: state.schema.map(function (s, k) {
+        return {
+          header: s.header, value: item.values[k] === undefined ? '' : item.values[k],
+          readOnly: s.readOnly, isOption: s.isOption, options: s.options
+        };
+      }),
+      images: (item.images || []).map(function (im) {
+        return { fileId: im.fileId, name: im.name, directUrl: 'https://lh3.googleusercontent.com/d/' + im.fileId };
+      }),
+      qc: { status: item.qcStatus, user: item.qcUser, end: item.qcEnd }
+    };
+  }
+
+  /** Local build first; only falls back to the server if values are missing. */
   function fetchRecord(id, useCache) {
     var key = recordKey(id);
     if (useCache !== false && state.recordCache[key]) return Promise.resolve(state.recordCache[key]);
+
+    var item = state.queue.filter(function (q) { return q.id === id; })[0];
+    var local = item && buildRecord(item);
+    if (local) { state.recordCache[key] = local; return Promise.resolve(local); }
+
     return window.QCApi.call('getRecord', {
       date: state.filters.date, folderType: state.filters.folderType, id: id
     }).then(function (rec) {
@@ -567,6 +607,24 @@
       updateSessionStats();
       var q = state.queue[state.pos];
       q.qcStatus = res.status;
+      q.qcUser = (window.QCApi.currentUser() || {}).username || q.qcUser;
+      q.qcEnd = payload.qcEnd;
+      // mirror the saved values (and the 0/1 option columns the backend syncs)
+      // into the queue item, so the local rebuild stays accurate
+      if (q.values && state.schema) {
+        state.schema.forEach(function (s, k) {
+          if (payload.changes[s.header] !== undefined) {
+            q.values[k] = payload.changes[s.header];
+            return;
+          }
+          Object.keys(payload.changes).forEach(function (parent) {
+            if (s.header.indexOf(parent + '/') === 0) {
+              var opt = s.header.slice(parent.length + 1);
+              q.values[k] = String(payload.changes[parent]) === opt ? '1' : '0';
+            }
+          });
+        });
+      }
       renderJump();
       $('queue-jump').value = state.pos;
       var done = state.queue.filter(function (x) { return x.qcStatus === 'DONE'; }).length;
