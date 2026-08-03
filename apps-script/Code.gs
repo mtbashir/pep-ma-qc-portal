@@ -65,23 +65,39 @@ var PROPS = PropertiesService.getScriptProperties();
  *  the spreadsheets + external_request scopes are already granted.
  * ------------------------------------------------------------------ */
 
-function sheetsApi(ssId, path, method, payload) {
-  var params = {
-    method: method || 'get',
-    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
-    contentType: 'application/json',
-    muteHttpExceptions: true
-  };
-  if (payload) params.payload = JSON.stringify(payload);
-  var resp = UrlFetchApp.fetch('https://sheets.googleapis.com/v4/spreadsheets/' + ssId + path, params);
-  var code = resp.getResponseCode();
-  var text = resp.getContentText();
-  if (code >= 300) {
-    var err = new Error('Sheets API ' + code + ': ' + text.slice(0, 200));
-    err.httpCode = code;
-    throw err;
+/**
+ * Reads/writes go through the Sheets advanced service when it is available
+ * (Editor -> Services + -> "Sheets API"), which is by far the fastest path.
+ * If it is not enabled the same calls fall back to SpreadsheetApp with the
+ * identical targeted ranges — slower, but the portal keeps working.
+ */
+var _sheetsBroken = false;
+var _ssMemo = {};
+
+function openSs(ssId) {
+  if (!_ssMemo[ssId]) _ssMemo[ssId] = SpreadsheetApp.openById(ssId);
+  return _ssMemo[ssId];
+}
+
+function sheetsReady() {
+  if (_sheetsBroken) return false;
+  try { return (typeof Sheets !== 'undefined') && !!(Sheets && Sheets.Spreadsheets); }
+  catch (e) { return false; }
+}
+
+/** Remember, for this execution, that the advanced service is unusable. */
+function sheetsFailed(e) {
+  _sheetsBroken = true;
+  console.warn('Sheets advanced service unavailable, falling back to SpreadsheetApp: ' + (e && e.message));
+}
+
+function transpose(rows) {
+  var out = [];
+  var width = rows.reduce(function (w, r) { return Math.max(w, r.length); }, 0);
+  for (var c = 0; c < width; c++) {
+    out.push(rows.map(function (r) { return r[c] === undefined ? '' : r[c]; }));
   }
-  return JSON.parse(text);
+  return out;
 }
 
 /** A1 range helper: quotes a sheet name safely. */
@@ -96,17 +112,42 @@ function colLetter(n) {
 
 function valuesBatchGet(ssId, ranges, majorDimension) {
   if (!ranges.length) return [];
-  var qs = ranges.map(function (r) { return 'ranges=' + encodeURIComponent(r); }).join('&');
-  var path = '/values:batchGet?' + qs +
-    '&majorDimension=' + (majorDimension || 'ROWS') +
-    '&valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING';
-  return sheetsApi(ssId, path).valueRanges || [];
+  var md = majorDimension || 'ROWS';
+
+  if (sheetsReady()) {
+    try {
+      var res = Sheets.Spreadsheets.Values.batchGet(ssId, {
+        ranges: ranges,
+        majorDimension: md,
+        valueRenderOption: 'UNFORMATTED_VALUE',
+        dateTimeRenderOption: 'FORMATTED_STRING'
+      });
+      return res.valueRanges || [];
+    } catch (e) { sheetsFailed(e); }
+  }
+
+  var ss = openSs(ssId);
+  return ranges.map(function (r) {
+    var vals;
+    try { vals = ss.getRange(r).getValues(); } catch (e) { vals = []; }
+    return { values: md === 'COLUMNS' ? transpose(vals) : vals };
+  });
 }
 
-/** data = [{range, values}] — all written in a single HTTP call. */
+/** data = [{range, values}] — written in a single call where possible. */
 function valuesBatchUpdate(ssId, data) {
   if (!data.length) return;
-  sheetsApi(ssId, '/values:batchUpdate', 'post', { valueInputOption: 'RAW', data: data });
+
+  if (sheetsReady()) {
+    try {
+      Sheets.Spreadsheets.Values.batchUpdate({ valueInputOption: 'RAW', data: data }, ssId);
+      return;
+    } catch (e) { sheetsFailed(e); }
+  }
+
+  var ss = openSs(ssId);
+  data.forEach(function (d) { ss.getRange(d.range).setValues(d.values); });
+  SpreadsheetApp.flush();
 }
 
 /** First (or only) row/column of a batchGet result, never undefined. */
@@ -182,6 +223,7 @@ function route(p) {
   switch (action) {
     case 'logout':     return logout(p.token);
     case 'me':         return { ok: true, data: session };
+    case 'bootstrap':  return bootstrap(p);
     case 'getDates':   return getDates();
     case 'getFolders': return getFolders(p.date);
     case 'getFilters': return getFilters(p.date);
@@ -534,26 +576,22 @@ function dateIndex(date, forceRefresh) {
   }
 
   var ssId = ensureQcSheet(date);
-  var meta;
-  try {
-    meta = sheetsApi(ssId, '?fields=sheets.properties(title,gridProperties(rowCount,columnCount))');
-  } catch (e) {
-    if (e.httpCode === 404) {           // sheet was deleted/moved — rebuild it
-      PROPS.deleteProperty('QC_' + date);
-      ssId = ensureQcSheet(date);
-      meta = sheetsApi(ssId, '?fields=sheets.properties(title,gridProperties(rowCount,columnCount))');
-    } else { throw e; }
-  }
-
-  var props = meta.sheets[0].properties;
-  var sheetName = props.title;
+  var sheetName = qcTabName(ssId, date);
   var q = quoteSheet(sheetName);
 
   var headers = firstLine(valuesBatchGet(ssId, [q + '!1:1'])[0]).map(String);
+  if (!headers.length) {                 // stale spreadsheet id — rebuild once
+    PROPS.deleteProperty('QC_' + date);
+    PROPS.deleteProperty('QCTAB_' + date);
+    ssId = ensureQcSheet(date);
+    sheetName = qcTabName(ssId, date);
+    q = quoteSheet(sheetName);
+    headers = firstLine(valuesBatchGet(ssId, [q + '!1:1'])[0]).map(String);
+  }
   while (headers.length && headers[headers.length - 1] === '') headers.pop();
 
   var idCol = colLetter(headerIndex(headers, CONFIG.ID_HEADER) + 1);
-  var ids = firstLine(valuesBatchGet(ssId, [q + '!' + idCol + '2:' + idCol + props.gridProperties.rowCount], 'COLUMNS')[0]);
+  var ids = firstLine(valuesBatchGet(ssId, [q + '!' + idCol + '2:' + idCol], 'COLUMNS')[0]);
 
   var idToRow = {}, lastRow = 1;
   ids.forEach(function (v, i) {
@@ -564,6 +602,17 @@ function dateIndex(date, forceRefresh) {
   var idx = { ssId: ssId, sheetName: sheetName, headers: headers, idToRow: idToRow, lastRow: lastRow };
   cachePutBig(key, JSON.stringify(idx), 21600);
   return idx;
+}
+
+/** Tab name of the QC sheet, resolved once and remembered. */
+function qcTabName(ssId, date) {
+  var key = 'QCTAB_' + date;
+  var name = PROPS.getProperty(key);
+  if (!name) {
+    name = openSs(ssId).getSheets()[0].getName();
+    PROPS.setProperty(key, name);
+  }
+  return name;
 }
 
 /** A1 range for a whole data column (row 2 .. last row) of the QC sheet. */
@@ -612,6 +661,20 @@ function measureIndexes(headers, folderType) {
 /* ------------------------------------------------------------------ *
  *  Filters / queue / record
  * ------------------------------------------------------------------ */
+
+/**
+ * Everything the portal needs to populate its filter bar, in ONE request.
+ * Each Apps Script round trip costs a couple of seconds no matter how little
+ * work it does, so combining calls matters as much as making them cheap.
+ */
+function bootstrap(p) {
+  var out = { dates: getDates().data };
+  if (p.date) {
+    out.folders = getFolders(p.date).data;
+    out.filters = getFilters(p.date).data;
+  }
+  return { ok: true, data: out };
+}
 
 function getFilters(date) {
   var idx = dateIndex(date);

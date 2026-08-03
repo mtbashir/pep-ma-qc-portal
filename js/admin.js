@@ -157,7 +157,7 @@
 
   async function loadDates() {
     try {
-      var dates = await window.QCApi.call('getDates');
+      var dates = (await window.QCApi.call('bootstrap', {})).dates;
       var sel = $('prog-date');
       sel.innerHTML = '<option value="">Select date…</option>';
       dates.forEach(function (d) {

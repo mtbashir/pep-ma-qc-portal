@@ -101,6 +101,13 @@
         }
         throw new Error('Demo mode: sign in with demo/demo (or admin/admin). Configure js/config.js to connect the real backend.');
       case 'logout': return {};
+      case 'bootstrap':
+        var boot = { dates: ['2026-07-13'] };
+        if (p.date) {
+          boot.folders = ['PEP COOLER', 'KO COOLER', 'OTHERS COOLER', 'STORES PHOTOS', 'MT SHELVES'];
+          boot.filters = { cities: ['5.GJW', '6.LHR'], auditors: ['DEMO AUDITOR', 'DEMO AUDITOR 2'], channels: ['1.GT', '2.LMT'] };
+        }
+        return boot;
       case 'getDates': return ['2026-07-13'];
       case 'getFolders': return ['PEP COOLER', 'KO COOLER', 'OTHERS COOLER', 'STORES PHOTOS', 'MT SHELVES'];
       case 'getFilters': return { cities: ['5.GJW', '6.LHR'], auditors: ['DEMO AUDITOR', 'DEMO AUDITOR 2'], channels: ['1.GT', '2.LMT'] };

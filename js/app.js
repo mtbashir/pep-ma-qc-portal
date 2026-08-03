@@ -150,7 +150,8 @@
 
   async function loadDates() {
     try {
-      state.dates = await window.QCApi.call('getDates');
+      var boot = await window.QCApi.call('bootstrap', {});
+      state.dates = boot.dates;
       fillSelect($('f-date'), state.dates, 'Date…');
     } catch (e) { toast(e.message, 'err'); if (e.auth) showLogin(); }
   }
@@ -162,12 +163,12 @@
     if (!date) return;
     try {
       toast('Loading folders & filters…');
-      var folders = await window.QCApi.call('getFolders', { date: date });
-      var filters = await window.QCApi.call('getFilters', { date: date });
-      fillSelect($('f-folder'), folders, 'Folder…');
-      fillSelect($('f-city'), filters.cities, 'All cities');
-      fillSelect($('f-auditor'), filters.auditors, 'All auditors');
-      fillSelect($('f-channel'), filters.channels, 'All channels');
+      // folders + filters in a single round trip
+      var boot = await window.QCApi.call('bootstrap', { date: date });
+      fillSelect($('f-folder'), boot.folders, 'Folder…');
+      fillSelect($('f-city'), boot.filters.cities, 'All cities');
+      fillSelect($('f-auditor'), boot.filters.auditors, 'All auditors');
+      fillSelect($('f-channel'), boot.filters.channels, 'All channels');
       ['f-folder', 'f-city', 'f-auditor', 'f-channel'].forEach(function (id) { $(id).disabled = false; });
       hideToast();
     } catch (e) { toast(e.message, 'err'); if (e.auth) showLogin(); }
