@@ -15,6 +15,11 @@
  */
 
 var CONFIG = {
+  // Bumped whenever this file changes. Open the web app URL in a browser to
+  // see which version is actually deployed — the editor's "Deploy" button
+  // keeps serving the old snapshot unless you pick Version: "New version".
+  VERSION: '3.0',
+
   // Root Drive folder that contains one subfolder per day (YYYY-MM-DD)
   ROOT_FOLDER_ID: '15r9ltXPk4Ehc2ViR-UJ6277lmjbI9o2m',
 
@@ -194,7 +199,12 @@ function cacheDropBig(key) {
  * ------------------------------------------------------------------ */
 
 function doGet() {
-  return jsonOut({ ok: true, service: 'PEP MA QC Portal API', time: new Date().toISOString() });
+  return jsonOut({
+    ok: true,
+    service: 'PEP MA QC Portal API',
+    version: CONFIG.VERSION,
+    time: new Date().toISOString()
+  });
 }
 
 function doPost(e) {
