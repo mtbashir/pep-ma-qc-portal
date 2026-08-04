@@ -1,4 +1,8 @@
 /**
+ * TO CHECK THE BACKEND: pick "diagnose" in the function dropdown and press Run.
+ * Anything else in that dropdown is an internal helper and will error if run
+ * on its own — that is not a fault, it just needs arguments.
+ *
  * PEP MA QC Portal — Google Apps Script backend API
  *
  * Serves the GitHub Pages frontend. Reads the daily photo folders + KOBO RD
@@ -18,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '3.1',
+  VERSION: '3.2',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -83,6 +87,10 @@ var _sheetsBroken = false;
 var _ssMemo = {};
 
 function openSs(ssId) {
+  if (!ssId) {
+    throw new Error('openSs() is an internal helper and cannot be run on its own. ' +
+      'Pick "diagnose" (or "setup") in the function dropdown before pressing Run.');
+  }
   if (!_ssMemo[ssId]) _ssMemo[ssId] = SpreadsheetApp.openById(ssId);
   return _ssMemo[ssId];
 }
@@ -293,6 +301,89 @@ function qcLogSheet()    { return dbSheet('QCLog',    ['savedAt', 'date', 'folde
 
 /** Short public id of a login session (safe to store in logs — not the full token). */
 function sessionIdFromToken(token) { return String(token || '').slice(0, 8); }
+
+/**
+ * Health check — run this from the editor (function dropdown -> diagnose -> Run)
+ * and read the Execution log.
+ *
+ * It times each stage INSIDE the script. If these numbers are small but the
+ * portal still feels slow, the delay is Google's request/redirect layer or
+ * execution queueing, not this code — in that case the fix is to wait it out
+ * or check quota, not to change the script.
+ */
+function diagnose() {
+  var out = [];
+  function line(s) { out.push(s); }
+  function time(label, fn) {
+    var t0 = Date.now();
+    try {
+      var r = fn();
+      line('  ' + label + ': ' + (Date.now() - t0) + ' ms' + (r === undefined ? '' : ' — ' + r));
+    } catch (e) {
+      line('  ' + label + ': FAILED after ' + (Date.now() - t0) + ' ms — ' + e.message);
+    }
+  }
+
+  line('PEP MA QC Portal backend v' + CONFIG.VERSION);
+  line('');
+  line('Services');
+  line('  Sheets advanced service: ' + (sheetsReady()
+    ? 'ENABLED (fast path)'
+    : 'NOT ENABLED — add it via Services + -> Sheets API, or the slower SpreadsheetApp fallback is used'));
+  line('  Drive advanced service:  ' + ((typeof Drive !== 'undefined' && Drive.Files) ? 'ENABLED' : 'MISSING — add via Services + -> Drive API v3'));
+  line('  DB spreadsheet:          ' + (PROPS.getProperty('DB_ID') ? 'created' : 'MISSING — run setup()'));
+  line('  Output folder:           ' + (PROPS.getProperty('OUT_FOLDER_ID') ? 'created' : 'MISSING — run setup()'));
+  line('');
+
+  var dates = [];
+  line('Drive');
+  time('list dates', function () {
+    dates = getDates().data;
+    return dates.length + ' date folders (newest ' + (dates[0] || 'none') + ')';
+  });
+  if (!dates.length) { console.log(out.join('\n')); return; }
+
+  var date = dates[0];
+  var folders = {};
+  time('photo folders for ' + date, function () {
+    folders = photoFolders(date);
+    return Object.keys(folders).join(', ') || 'none';
+  });
+
+  var folderType = Object.keys(folders)[0];
+  if (!folderType) { console.log(out.join('\n')); return; }
+
+  time('photo list (' + folderType + ')', function () {
+    return Object.keys(imageMap(date, folderType)).length + ' photos';
+  });
+  line('');
+
+  line('Sheet (' + date + ')');
+  var idx = null;
+  time('build/read index', function () {
+    idx = dateIndex(date);
+    return idx.headers.length + ' columns, ' + Object.keys(idx.idToRow).length + ' survey rows';
+  });
+  if (idx) {
+    time('filters', function () {
+      var f = getFilters(date).data;
+      return f.cities.length + ' cities, ' + f.auditors.length + ' auditors';
+    });
+    time('queue page (first 60)', function () {
+      var q = getQueue({ date: date, folderType: folderType, limit: 60, offset: 0 }).data;
+      return q.items.length + ' of ' + q.total + ' photos';
+    });
+    time('queue page (next 150)', function () {
+      var q = getQueue({ date: date, folderType: folderType, limit: 150, offset: 60 }).data;
+      return q.items.length + ' photos';
+    });
+  }
+
+  line('');
+  line('If the numbers above are small (a few seconds) but the portal is slow,');
+  line('the delay is in Google request handling, not this script.');
+  console.log(out.join('\n'));
+}
 
 /** One-time initialisation: creates the DB spreadsheet, output folder and admin user. */
 function setup() {
