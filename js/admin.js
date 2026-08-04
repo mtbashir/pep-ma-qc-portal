@@ -29,7 +29,11 @@
     var user = window.QCApi.currentUser();
     if (!user) return showLogin();
     try { await window.QCApi.call('me'); showApp(user); }
-    catch (e) { window.QCApi.clearSession(); showLogin(); }
+    catch (e) {
+      if (e.staleSession) return;   // a newer sign-in has superseded this check
+      window.QCApi.clearSession();
+      showLogin();
+    }
   }
 
   $('login-form').addEventListener('submit', async function (ev) {
@@ -84,7 +88,7 @@
         actions.appendChild(pwBtn); actions.appendChild(actBtn);
         tb.appendChild(tr);
       });
-    } catch (e) { toast(e.message, 'err'); if (e.auth) showLogin(); }
+    } catch (e) { if (e.staleSession) return; toast(e.message, 'err'); if (e.auth) showLogin(); }
   }
 
   $('create-form').addEventListener('submit', async function (ev) {
@@ -203,7 +207,7 @@
         $('sheet-link').href = data.sheetUrl;
         $('sheet-link').classList.remove('hidden');
       }
-    } catch (e) { toast(e.message, 'err'); if (e.auth) showLogin(); }
+    } catch (e) { if (e.staleSession) return; toast(e.message, 'err'); if (e.auth) showLogin(); }
     finally { this.disabled = false; this.textContent = 'Show progress'; }
   });
 

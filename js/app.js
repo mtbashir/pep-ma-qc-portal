@@ -46,6 +46,9 @@
       await window.QCApi.call('me');
       showApp(user);
     } catch (e) {
+      // This check can resolve long after the user has signed in again
+      // (Apps Script is slow to answer); never tear down the newer session.
+      if (e.staleSession) return;
       window.QCApi.clearSession();
       showLogin();
     }
@@ -103,7 +106,7 @@
       s = await window.QCApi.call('getSessionSummary');
     } catch (e) {
       if (fromSignout) { doLogout(); return; }
-      toast(e.message, 'err'); if (e.auth) showLogin();
+      if (e.staleSession) return; toast(e.message, 'err'); if (e.auth) showLogin();
       return;
     }
     $('summary-user').textContent = (s.displayName || s.username) +
@@ -158,7 +161,7 @@
       state.dates = boot.dates;
       if (boot.queue) state.pageSizes = boot.queue;
       fillSelect($('f-date'), state.dates, 'Date…');
-    } catch (e) { toast(e.message, 'err'); if (e.auth) showLogin(); }
+    } catch (e) { if (e.staleSession) return; toast(e.message, 'err'); if (e.auth) showLogin(); }
   }
 
   $('f-date').addEventListener('change', async function () {
@@ -176,7 +179,7 @@
       fillSelect($('f-channel'), boot.filters.channels, 'All channels');
       ['f-folder', 'f-city', 'f-auditor', 'f-channel'].forEach(function (id) { $(id).disabled = false; });
       hideToast();
-    } catch (e) { toast(e.message, 'err'); if (e.auth) showLogin(); }
+    } catch (e) { if (e.staleSession) return; toast(e.message, 'err'); if (e.auth) showLogin(); }
   });
 
   $('f-folder').addEventListener('change', function () {
@@ -231,7 +234,7 @@
       }
       goTo(firstPending());
       loadRemainingPages(token);          // continues while the user works
-    } catch (e) { toast(e.message, 'err'); if (e.auth) showLogin(); }
+    } catch (e) { if (e.staleSession) return; toast(e.message, 'err'); if (e.auth) showLogin(); }
     finally { $('btn-load').disabled = false; }
   }
 
@@ -385,7 +388,7 @@
       renderRecord(rec);
       loadImage(rec, 0, token);
       prefetch(i + 1);
-    } catch (e) { toast(e.message, 'err'); if (e.auth) showLogin(); }
+    } catch (e) { if (e.staleSession) return; toast(e.message, 'err'); if (e.auth) showLogin(); }
   }
 
   /* ================= record rendering ================= */
@@ -699,7 +702,7 @@
       updateQueueStats();
       toast(res.status === 'FLAGGED' ? 'Flagged ⚑' : 'Saved ✔' + (res.changed ? ' (' + res.changed + ' change' + (res.changed > 1 ? 's' : '') + ')' : ''), 'ok');
       if ($('chk-auto-next').checked) step(1); else goTo(state.pos);
-    } catch (e) { toast(e.message, 'err'); if (e.auth) showLogin(); }
+    } catch (e) { if (e.staleSession) return; toast(e.message, 'err'); if (e.auth) showLogin(); }
     finally { btn.disabled = false; }
   }
 

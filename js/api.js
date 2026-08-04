@@ -22,7 +22,8 @@
     params = params || {};
     if (isDemo()) return demoApi(action, params);
 
-    var body = Object.assign({ action: action, token: localStorage.getItem(TOKEN_KEY) || '' }, params);
+    var tokenUsed = localStorage.getItem(TOKEN_KEY) || '';
+    var body = Object.assign({ action: action, token: tokenUsed }, params);
     var lastErr;
 
     for (var attempt = 0; attempt < RETRY_DELAYS.length; attempt++) {
@@ -41,9 +42,16 @@
           var err = new Error(out.error || 'Request failed');
           err.fromServer = true;             // a real answer — do not retry it
           if (/^AUTH:/.test(out.error || '')) {
-            localStorage.removeItem(TOKEN_KEY);
-            localStorage.removeItem(USER_KEY);
             err.auth = true;
+            // Only sign out if this failure belongs to the session that is
+            // still current. A slow request left over from a previous session
+            // must not wipe a login that has since succeeded.
+            if ((localStorage.getItem(TOKEN_KEY) || '') === tokenUsed) {
+              localStorage.removeItem(TOKEN_KEY);
+              localStorage.removeItem(USER_KEY);
+            } else {
+              err.staleSession = true;
+            }
           }
           throw err;
         }
