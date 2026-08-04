@@ -168,6 +168,7 @@
     var date = this.value;
     ['f-folder', 'f-city', 'f-auditor', 'f-channel'].forEach(function (id) { $(id).disabled = true; });
     $('btn-load').disabled = true;
+    $('btn-refresh').disabled = !date;
     if (!date) return;
     try {
       toast('Loading folders & filters…');
@@ -187,6 +188,43 @@
   });
 
   $('btn-load').addEventListener('click', loadQueue);
+
+  // Re-reads the date from Drive: imports survey rows uploaded after the QC
+  // sheet was created and picks up newly added photos.
+  $('btn-refresh').addEventListener('click', async function () {
+    var date = $('f-date').value;
+    if (!date) return;
+    var btn = this;
+    btn.disabled = true;
+    var label = btn.textContent;
+    btn.textContent = '↻ Refreshing…';
+    toast('Re-reading ' + date + ' from Drive — this can take a minute…');
+    try {
+      var r = await window.QCApi.call('refreshDate', { date: date });
+      toast(r.rowsAdded
+        ? 'Added ' + r.rowsAdded + ' new survey rows · now ' + r.surveyRows + ' rows, ' + r.photos + ' photos'
+        : 'Up to date · ' + r.surveyRows + ' rows, ' + r.photos + ' photos', 'ok');
+      // refresh the filter lists, then reload the queue if one was showing
+      $('f-date').dispatchEvent(new Event('change'));
+      if (state.filters.folderType) {
+        var keep = state.filters.folderType;
+        var wait = setInterval(function () {
+          if (!$('f-folder').disabled) {
+            clearInterval(wait);
+            $('f-folder').value = keep;
+            $('btn-load').disabled = false;
+            loadQueue();
+          }
+        }, 400);
+      }
+    } catch (e) {
+      if (!e.staleSession) toast(e.message, 'err');
+      if (e.auth) showLogin();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  });
 
   /* ================= queue ================= */
 

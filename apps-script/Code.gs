@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '3.2',
+  VERSION: '3.3',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -198,6 +198,24 @@ function cacheGetBig(key) {
   return out;
 }
 
+/**
+ * Today's folder is still being filled by the field team, so its data is
+ * cached only briefly. Past dates are settled and cached for hours.
+ */
+function cacheTtl(date) {
+  var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  return date === today ? 180 : 21600;
+}
+
+/** Bumped when a date is refreshed, so every cached key for it is bypassed. */
+function dateGen(date) {
+  return PROPS.getProperty('GEN_' + date) || '0';
+}
+
+function bumpDateGen(date) {
+  PROPS.setProperty('GEN_' + date, String(Number(dateGen(date)) + 1));
+}
+
 function cacheDropBig(key) {
   var n = Number(CacheService.getScriptCache().get(key + '|n'));
   var keys = [key + '|n'];
@@ -259,6 +277,7 @@ function route(p) {
     case 'logout':     return logout(p.token);
     case 'me':         return { ok: true, data: session };
     case 'bootstrap':  return bootstrap(p);
+    case 'refreshDate': return refreshDate(p);
     case 'getDates':   return getDates();
     case 'getFolders': return getFolders(p.date);
     case 'getFilters': return getFilters(p.date);
@@ -547,7 +566,7 @@ function dateFolderId(date) {
 
 /** Photo subfolders of a date folder, keyed by folder type ("PEP COOLER" etc). */
 function photoFolders(date) {
-  var key = 'folders3|' + date;
+  var key = 'folders3|' + dateGen(date) + '|' + date;
   var hit = cacheGetBig(key);
   if (hit) return JSON.parse(hit);
 
@@ -562,7 +581,7 @@ function photoFolders(date) {
       }
     }
   });
-  cachePutBig(key, JSON.stringify(result), 21600);
+  cachePutBig(key, JSON.stringify(result), cacheTtl(date));
   return result;
 }
 
@@ -572,7 +591,7 @@ function getFolders(date) {
 
 /** Map _id -> [{fileId, name}] for the images of one folder type. Cached 6 h. */
 function imageMap(date, folderType) {
-  var key = 'imgs3|' + date + '|' + folderType;
+  var key = 'imgs3|' + dateGen(date) + '|' + date + '|' + folderType;
   var hit = cacheGetBig(key);
   if (hit) { try { return JSON.parse(hit); } catch (e) { /* rebuild */ } }
 
@@ -584,7 +603,7 @@ function imageMap(date, folderType) {
     if (!m) return;
     (map[m[1]] = map[m[1]] || []).push({ fileId: f.id, name: f.name });
   });
-  cachePutBig(key, JSON.stringify(map), 21600);
+  cachePutBig(key, JSON.stringify(map), cacheTtl(date));
   return map;
 }
 
@@ -667,6 +686,94 @@ function ensureQcSheet(date) {
   }
 }
 
+/**
+ * Pulls survey rows that exist in the day's Kobo file but not yet in the QC
+ * sheet, and appends them.
+ *
+ * The QC sheet is a copy taken the first time a date is opened, so anything
+ * the field team uploads later in the day would otherwise never appear.
+ * Existing rows are never touched — QC corrections and QC columns are safe.
+ * Returns the number of rows added.
+ */
+function syncNewRows(date) {
+  var idx = dateIndex(date, true);
+
+  var src = driveList(dateFolderId(date)).filter(function (f) {
+    return f.name.indexOf(CONFIG.KOBO_FILE_PREFIX) === 0;
+  })[0];
+  if (!src) throw new Error('No "' + CONFIG.KOBO_FILE_PREFIX + '" file found in folder ' + date);
+
+  // the source is an .xlsx, so convert a throwaway copy to read it
+  var temp = Drive.Files.copy(
+    { name: 'TEMP KOBO ' + date + ' ' + Date.now(),
+      mimeType: 'application/vnd.google-apps.spreadsheet',
+      parents: [outputFolder().getId()] },
+    src.id, { supportsAllDrives: true }
+  );
+
+  try {
+    var values = SpreadsheetApp.openById(temp.id).getSheets()[0].getDataRange().getValues();
+    if (values.length < 2) return 0;
+
+    var srcHeaders = values[0].map(String);
+    var srcIdCol = srcHeaders.indexOf(CONFIG.ID_HEADER);
+    if (srcIdCol === -1) throw new Error('Kobo file has no "' + CONFIG.ID_HEADER + '" column');
+
+    // match by header name, so column order/count may differ safely
+    var destCol = srcHeaders.map(function (h) { return idx.headers.indexOf(h); });
+
+    var newRows = [];
+    for (var r = 1; r < values.length; r++) {
+      var id = String(values[r][srcIdCol]).replace(/\.0$/, '').trim();
+      if (!id || idx.idToRow[id]) continue;          // already in the QC sheet
+      var row = [];
+      for (var c = 0; c < idx.headers.length; c++) row.push('');
+      srcHeaders.forEach(function (h, c) {
+        if (destCol[c] >= 0) row[destCol[c]] = fmtValue(values[r][c]);
+      });
+      newRows.push(row);
+    }
+
+    if (newRows.length) {
+      var start = idx.lastRow + 1;
+      valuesBatchUpdate(idx.ssId, [{
+        range: quoteSheet(idx.sheetName) + '!A' + start + ':' +
+               colLetter(idx.headers.length) + (start + newRows.length - 1),
+        values: newRows
+      }]);
+    }
+    return newRows.length;
+  } finally {
+    try { DriveApp.getFileById(temp.id).setTrashed(true); } catch (e) { /* leave the temp file */ }
+  }
+}
+
+/**
+ * Re-reads a day from scratch: drops every cached view of it and imports any
+ * survey rows added since the QC sheet was created.
+ */
+function refreshDate(p) {
+  var date = p.date;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) throw new Error('Invalid date');
+
+  var added = syncNewRows(date);
+  bumpDateGen(date);                 // invalidates every cached key for this date
+  cacheDropBig('dates3');            // a brand new date folder may exist too
+
+  var idx = dateIndex(date, true);
+  var photos = 0;
+  var folders = photoFolders(date);
+  Object.keys(folders).forEach(function (t) { photos += Object.keys(imageMap(date, t)).length; });
+
+  return { ok: true, data: {
+    date: date,
+    rowsAdded: added,
+    surveyRows: Object.keys(idx.idToRow).length,
+    photos: photos,
+    folders: Object.keys(folders)
+  } };
+}
+
 function qcColName(folderType, field) { return 'QC ' + folderType + ' - ' + field; }
 
 /** Idempotently appends the per-folder-type QC columns after the Kobo columns. */
@@ -692,7 +799,7 @@ function appendQcColumns(ssId) {
  * cache for 6 h — this is what removes the per-request sheet scan.
  */
 function dateIndex(date, forceRefresh) {
-  var key = 'idx3|' + date;
+  var key = 'idx3|' + dateGen(date) + '|' + date;
   if (!forceRefresh) {
     var hit = cacheGetBig(key);
     if (hit) { try { return JSON.parse(hit); } catch (e) { /* rebuild */ } }
@@ -723,7 +830,7 @@ function dateIndex(date, forceRefresh) {
   });
 
   var idx = { ssId: ssId, sheetName: sheetName, headers: headers, idToRow: idToRow, lastRow: lastRow };
-  cachePutBig(key, JSON.stringify(idx), 21600);
+  cachePutBig(key, JSON.stringify(idx), cacheTtl(date));
   return idx;
 }
 
@@ -864,7 +971,7 @@ function timer() {
  * fresh on each page so progress marks stay correct.
  */
 function queueList(p, idx, imgs) {
-  var key = ['qlist4', p.date, p.folderType, p.city || '', p.auditor || '', p.channel || ''].join('|');
+  var key = ['qlist4', dateGen(p.date), p.date, p.folderType, p.city || '', p.auditor || '', p.channel || ''].join('|');
   var hit = cacheGetBig(key);
   if (hit) { try { return JSON.parse(hit); } catch (e) { /* rebuild */ } }
 
@@ -897,7 +1004,7 @@ function queueList(p, idx, imgs) {
     items: items,
     unmatchedImages: Object.keys(imgs).filter(function (id) { return !matched[id]; }).length
   };
-  cachePutBig(key, JSON.stringify(list), 900);
+  cachePutBig(key, JSON.stringify(list), Math.min(900, cacheTtl(p.date)));
   return list;
 }
 

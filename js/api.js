@@ -140,6 +140,8 @@
           boot.filters = { cities: ['5.GJW', '6.LHR'], auditors: ['DEMO AUDITOR', 'DEMO AUDITOR 2'], channels: ['1.GT', '2.LMT'] };
         }
         return boot;
+      case 'refreshDate':
+        return { date: p.date, rowsAdded: 0, surveyRows: DEMO_QUEUE.length, photos: DEMO_QUEUE.length, folders: ['PEP COOLER'] };
       case 'getDates': return ['2026-07-13'];
       case 'getFolders': return ['PEP COOLER', 'KO COOLER', 'OTHERS COOLER', 'STORES PHOTOS', 'MT SHELVES'];
       case 'getFilters': return { cities: ['5.GJW', '6.LHR'], auditors: ['DEMO AUDITOR', 'DEMO AUDITOR 2'], channels: ['1.GT', '2.LMT'] };
