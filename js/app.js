@@ -535,25 +535,17 @@
       try { return cacheImageSrc(image.fileId, await probeUrl(image.directUrl + '=s' + size)); }
       catch (e) { /* not shared publicly — fall back to the API */ }
     }
-    // Apps Script drops the occasional request (transient 404 on the redirect,
-    // more often on big payloads), so retry with backoff and shrink the image
-    // on later attempts rather than failing in the user's face.
-    var delays = [0, 800, 2000, 4000];
-    var lastErr;
-    for (var attempt = 0; attempt < delays.length; attempt++) {
-      if (delays[attempt]) await new Promise(function (r) { setTimeout(r, delays[attempt]); });
-      try {
-        var d = await window.QCApi.call('getImage', {
-          fileId: image.fileId,
-          size: attempt < 2 ? size : Math.round(size * 0.6)
-        });
-        return cacheImageSrc(image.fileId, 'data:' + d.mime + ';base64,' + d.base64);
-      } catch (e) {
-        if (e.auth) throw e;
-        lastErr = e;
-      }
+    // The API client already retries dropped requests; the extra attempt here
+    // asks for a smaller image, since big payloads are the ones Apps Script
+    // most often fails to deliver.
+    try {
+      var d = await window.QCApi.call('getImage', { fileId: image.fileId, size: size });
+      return cacheImageSrc(image.fileId, 'data:' + d.mime + ';base64,' + d.base64);
+    } catch (e) {
+      if (e.auth) throw e;
+      var small = await window.QCApi.call('getImage', { fileId: image.fileId, size: Math.round(size * 0.6) });
+      return cacheImageSrc(image.fileId, 'data:' + small.mime + ';base64,' + small.base64);
     }
-    throw lastErr;
   }
 
   async function loadImage(rec, index, token) {

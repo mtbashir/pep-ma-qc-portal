@@ -9,30 +9,54 @@
     return !window.QC_CONFIG.API_URL || window.QC_CONFIG.API_URL.indexOf('PASTE_') === 0;
   }
 
+  // Apps Script intermittently drops a request — the POST is 302-redirected to
+  // googleusercontent and that hop sometimes answers 404, or the script hits a
+  // cold start and times out. These are transport failures, not real errors, so
+  // they are retried. Errors the backend actually reported are never retried.
+  var RETRY_DELAYS = [0, 700, 1800, 3500];
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
   /** POST one action to the backend. Resolves the `data` payload or throws. */
   async function api(action, params) {
     params = params || {};
     if (isDemo()) return demoApi(action, params);
 
     var body = Object.assign({ action: action, token: localStorage.getItem(TOKEN_KEY) || '' }, params);
-    var resp = await fetch(window.QC_CONFIG.API_URL, {
-      method: 'POST',
-      // text/plain avoids a CORS preflight, which Apps Script does not answer
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(body)
-    });
-    if (!resp.ok) throw new Error('Network error (' + resp.status + ')');
-    var out = await resp.json();
-    if (!out.ok) {
-      var err = new Error(out.error || 'Request failed');
-      if (/^AUTH:/.test(out.error || '')) {
-        localStorage.removeItem(TOKEN_KEY);
-        localStorage.removeItem(USER_KEY);
-        err.auth = true;
+    var lastErr;
+
+    for (var attempt = 0; attempt < RETRY_DELAYS.length; attempt++) {
+      if (RETRY_DELAYS[attempt]) await sleep(RETRY_DELAYS[attempt]);
+      try {
+        var resp = await fetch(window.QC_CONFIG.API_URL, {
+          method: 'POST',
+          // text/plain avoids a CORS preflight, which Apps Script does not answer
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify(body)
+        });
+        if (!resp.ok) throw new Error('Network error (' + resp.status + ')');
+
+        var out = await resp.json();
+        if (!out.ok) {
+          var err = new Error(out.error || 'Request failed');
+          err.fromServer = true;             // a real answer — do not retry it
+          if (/^AUTH:/.test(out.error || '')) {
+            localStorage.removeItem(TOKEN_KEY);
+            localStorage.removeItem(USER_KEY);
+            err.auth = true;
+          }
+          throw err;
+        }
+        return out.data;
+      } catch (e) {
+        if (e.fromServer) throw e;
+        lastErr = e;
       }
-      throw err;
     }
-    return out.data;
+    lastErr = lastErr || new Error('Request failed');
+    lastErr.message += ' — the Google backend did not respond after ' +
+      RETRY_DELAYS.length + ' attempts. Please try again.';
+    throw lastErr;
   }
 
   function saveSession(data) {
