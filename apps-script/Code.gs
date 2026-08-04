@@ -209,7 +209,21 @@ function cacheDropBig(key) {
  *  HTTP entry points
  * ------------------------------------------------------------------ */
 
-function doGet() {
+function doGet(e) {
+  var p = (e && e.parameter) || {};
+
+  // Health check over HTTP so it can be run without touching the editor.
+  // Requires an admin session token, same as every other privileged action.
+  if (p.run === 'diagnose') {
+    try {
+      var session = requireSession(p.token);
+      if (session.role !== 'admin') throw new Error('Admin access required');
+      return jsonOut({ ok: true, data: diagnoseReport() });
+    } catch (err) {
+      return jsonOut({ ok: false, error: String((err && err.message) || err) });
+    }
+  }
+
   return jsonOut({
     ok: true,
     service: 'PEP MA QC Portal API',
@@ -312,6 +326,11 @@ function sessionIdFromToken(token) { return String(token || '').slice(0, 8); }
  * or check quota, not to change the script.
  */
 function diagnose() {
+  console.log(diagnoseReport().join('\n'));
+}
+
+/** Builds the health-check report as an array of lines. */
+function diagnoseReport() {
   var out = [];
   function line(s) { out.push(s); }
   function time(label, fn) {
@@ -341,7 +360,7 @@ function diagnose() {
     dates = getDates().data;
     return dates.length + ' date folders (newest ' + (dates[0] || 'none') + ')';
   });
-  if (!dates.length) { console.log(out.join('\n')); return; }
+  if (!dates.length) return out;
 
   var date = dates[0];
   var folders = {};
@@ -351,7 +370,7 @@ function diagnose() {
   });
 
   var folderType = Object.keys(folders)[0];
-  if (!folderType) { console.log(out.join('\n')); return; }
+  if (!folderType) return out;
 
   time('photo list (' + folderType + ')', function () {
     return Object.keys(imageMap(date, folderType)).length + ' photos';
@@ -382,7 +401,7 @@ function diagnose() {
   line('');
   line('If the numbers above are small (a few seconds) but the portal is slow,');
   line('the delay is in Google request handling, not this script.');
-  console.log(out.join('\n'));
+  return out;
 }
 
 /** One-time initialisation: creates the DB spreadsheet, output folder and admin user. */
