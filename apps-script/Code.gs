@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '3.3',
+  VERSION: '3.4',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -400,7 +400,9 @@ function diagnoseReport() {
   var idx = null;
   time('build/read index', function () {
     idx = dateIndex(date);
-    return idx.headers.length + ' columns, ' + Object.keys(idx.idToRow).length + ' survey rows';
+    var missing = expectedQcColumns().filter(function (h) { return idx.headers.indexOf(h) === -1; });
+    return idx.headers.length + ' columns, ' + Object.keys(idx.idToRow).length + ' survey rows' +
+      (missing.length ? ' — WARNING: ' + missing.length + ' QC columns missing' : ', QC columns OK');
   });
   if (idx) {
     time('filters', function () {
@@ -776,21 +778,39 @@ function refreshDate(p) {
 
 function qcColName(folderType, field) { return 'QC ' + folderType + ' - ' + field; }
 
-/** Idempotently appends the per-folder-type QC columns after the Kobo columns. */
+/** Every QC column a QC sheet should carry. */
+function expectedQcColumns() {
+  var all = [];
+  Object.keys(CONFIG.FOLDER_TYPES).forEach(function (type) {
+    CONFIG.QC_FIELDS.forEach(function (field) { all.push(qcColName(type, field)); });
+  });
+  return all;
+}
+
+/**
+ * Idempotently appends the per-folder-type QC columns after the Kobo columns.
+ *
+ * Converting an .xlsx gives a sheet whose grid is exactly as wide as its data,
+ * so the QC headers need room made for them first. Without this the write lands
+ * outside the grid and the sheet ends up with no QC columns at all — which
+ * makes every queue request fail with "Column not found: QC ... - Status".
+ * Returns how many columns were added.
+ */
 function appendQcColumns(ssId) {
   var sh = SpreadsheetApp.openById(ssId).getSheets()[0];
   var lastCol = sh.getLastColumn();
   var headers = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
-  var missing = [];
-  Object.keys(CONFIG.FOLDER_TYPES).forEach(function (type) {
-    CONFIG.QC_FIELDS.forEach(function (field) {
-      var h = qcColName(type, field);
-      if (headers.indexOf(h) === -1) missing.push(h);
-    });
-  });
-  if (missing.length) {
-    sh.getRange(1, lastCol + 1, 1, missing.length).setValues([missing]);
-  }
+
+  var missing = expectedQcColumns().filter(function (h) { return headers.indexOf(h) === -1; });
+  if (!missing.length) return 0;
+
+  var needed = lastCol + missing.length;
+  var maxCols = sh.getMaxColumns();
+  if (maxCols < needed) sh.insertColumnsAfter(maxCols, needed - maxCols);
+
+  sh.getRange(1, lastCol + 1, 1, missing.length).setValues([missing]);
+  SpreadsheetApp.flush();
+  return missing.length;
 }
 
 /**
@@ -819,6 +839,16 @@ function dateIndex(date, forceRefresh) {
     headers = firstLine(valuesBatchGet(ssId, [q + '!1:1'])[0]).map(String);
   }
   while (headers.length && headers[headers.length - 1] === '') headers.pop();
+
+  // Self-heal: a sheet created before the grid-width fix (or by an interrupted
+  // run) can be missing its QC columns, which breaks every queue request.
+  // Add them now rather than leaving the date permanently unusable.
+  var lacking = expectedQcColumns().filter(function (h) { return headers.indexOf(h) === -1; });
+  if (lacking.length) {
+    appendQcColumns(ssId);
+    headers = firstLine(valuesBatchGet(ssId, [q + '!1:1'])[0]).map(String);
+    while (headers.length && headers[headers.length - 1] === '') headers.pop();
+  }
 
   var idCol = colLetter(headerIndex(headers, CONFIG.ID_HEADER) + 1);
   var ids = firstLine(valuesBatchGet(ssId, [q + '!' + idCol + '2:' + idCol], 'COLUMNS')[0]);
