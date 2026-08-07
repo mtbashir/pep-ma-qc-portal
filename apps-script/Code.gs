@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '3.4',
+  VERSION: '3.5',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -405,6 +405,20 @@ function diagnoseReport() {
       (missing.length ? ' — WARNING: ' + missing.length + ' QC columns missing' : ', QC columns OK');
   });
   if (idx) {
+    // which configured columns this survey version actually still has
+    var expectedCore = [CONFIG.ID_HEADER, CONFIG.FILTERS.city, CONFIG.FILTERS.auditor,
+                        CONFIG.FILTERS.channel, 'Select Store ID', 'Select Store Name']
+      .concat(CONFIG.CONTEXT_HEADERS);
+    var absent = expectedCore.filter(function (h, i, a) {
+      return a.indexOf(h) === i && idx.headers.indexOf(h) === -1;
+    });
+    line('  survey columns: ' + (absent.length
+      ? absent.length + ' configured column(s) not in this survey version — ' + absent.join('; ')
+      : 'all configured columns present'));
+    Object.keys(CONFIG.FOLDER_TYPES).forEach(function (type) {
+      line('    ' + type + ': ' + measureIndexes(idx.headers, type).length + ' measure columns');
+    });
+
     time('filters', function () {
       var f = getFilters(date).data;
       return f.cities.length + ' cities, ' + f.auditors.length + ' auditors';
@@ -897,6 +911,59 @@ function headerIndex(headers, name) {
   return i; // 0-based
 }
 
+/* ------------------------------------------------------------------ *
+ *  Survey-version tolerance
+ *
+ *  Kobo forms change between versions: questions get dropped and the
+ *  column count shifts, while the headers that remain keep their names.
+ *  Everything below is therefore driven by header text and question
+ *  number — never by column position — and a column that no longer
+ *  exists is skipped rather than treated as an error.
+ * ------------------------------------------------------------------ */
+
+/** Leading question number of a header, e.g. "2.1.24a: Brand Facings…" -> "2.1.24a". */
+function questionKey(header) {
+  var m = String(header).match(/^(\d+(?:\.\d+[a-zA-Z]?)*)\s*:/);
+  return m ? m[1] : null;
+}
+
+/** Orders question numbers naturally: 2.1.9 < 2.1.10 < 2.1.24 < 2.1.24a. */
+function compareQuestion(a, b) {
+  var pa = String(a).split('.'), pb = String(b).split('.');
+  for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
+    var x = pa[i] === undefined ? '' : pa[i];
+    var y = pb[i] === undefined ? '' : pb[i];
+    var nx = parseInt(x, 10); if (isNaN(nx)) nx = -1;
+    var ny = parseInt(y, 10); if (isNaN(ny)) ny = -1;
+    if (nx !== ny) return nx - ny;
+    var sx = x.replace(/^\d+/, ''), sy = y.replace(/^\d+/, '');
+    if (sx !== sy) return sx < sy ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Reads the named columns that exist, in one call.
+ * Returns { headerName: [values…] } with an empty array for any column the
+ * current survey version no longer has.
+ */
+function readNamedColumns(idx, names) {
+  var present = names.filter(function (n) { return idx.headers.indexOf(n) !== -1; });
+  var res = present.length
+    ? valuesBatchGet(idx.ssId, present.map(function (n) { return colRange(idx, n); }), 'COLUMNS').map(firstLine)
+    : [];
+  var out = {};
+  names.forEach(function (n) { out[n] = []; });
+  present.forEach(function (n, k) { out[n] = res[k] || []; });
+  return out;
+}
+
+/** Value at a row from a readNamedColumns result, '' when absent. */
+function colCell(cols, name, r) {
+  var v = cols[name] && cols[name][r];
+  return v === undefined || v === null ? '' : String(v);
+}
+
 /**
  * Describes the editable measures of a folder type once (header, options,
  * read-only), so the queue can ship values without repeating the metadata
@@ -920,20 +987,28 @@ function measureSchema(headers, folderType) {
 function measureIndexes(headers, folderType) {
   var spec = CONFIG.FOLDER_TYPES[folderType];
   if (!spec) throw new Error('Unknown folder type: ' + folderType);
+
+  // explicit header list (STORES PHOTOS): keep whichever still exist
   if (spec.headers) {
-    return spec.headers.map(function (h) { return headerIndex(headers, h); });
+    var found = [];
+    spec.headers.forEach(function (h) {
+      var i = headers.indexOf(h);
+      if (i !== -1) found.push(i);
+    });
+    return found;
   }
-  var startMarker = spec.range[0], endMarker = spec.range[1];
-  var first = -1, last = -1;
-  headers.forEach(function (h, i) {
-    if (h.indexOf(startMarker + ':') === 0 && first === -1) first = i;
-    if (h.indexOf(endMarker + ':') === 0) last = i;
-  });
-  if (first === -1 || last === -1 || last < first) {
-    throw new Error('Could not locate columns ' + startMarker + ' … ' + endMarker + ' for ' + folderType);
-  }
+
+  // Question-number range. Selecting every question that falls inside the
+  // range — rather than locating the exact first and last columns — means a
+  // survey version that drops questions (including the boundary ones) still
+  // resolves correctly, and column order/count no longer matters.
+  var start = spec.range[0], end = spec.range[1];
   var idx = [];
-  for (var i = first; i <= last; i++) idx.push(i);
+  headers.forEach(function (h, i) {
+    var key = questionKey(h);
+    if (!key) return;
+    if (compareQuestion(key, start) >= 0 && compareQuestion(key, end) <= 0) idx.push(i);
+  });
   return idx;
 }
 
@@ -963,22 +1038,23 @@ function getFilters(date) {
   var idx = dateIndex(date);
   if (idx.lastRow < 2) return { ok: true, data: { cities: [], auditors: [], channels: [] } };
 
-  // one HTTP call for the three columns instead of a full-sheet scan
-  var res = valuesBatchGet(idx.ssId, [
-    colRange(idx, CONFIG.FILTERS.city),
-    colRange(idx, CONFIG.FILTERS.auditor),
-    colRange(idx, CONFIG.FILTERS.channel)
-  ], 'COLUMNS');
+  // one HTTP call for the three columns instead of a full-sheet scan;
+  // a filter whose column this survey version dropped just comes back empty
+  var cols = readNamedColumns(idx, [CONFIG.FILTERS.city, CONFIG.FILTERS.auditor, CONFIG.FILTERS.channel]);
 
-  function uniq(i) {
+  function uniq(name) {
     var seen = {};
-    firstLine(res[i]).forEach(function (v) {
+    (cols[name] || []).forEach(function (v) {
       var s = String(v).trim();
       if (s && s !== 'null') seen[s] = 1;
     });
     return Object.keys(seen).sort();
   }
-  return { ok: true, data: { cities: uniq(0), auditors: uniq(1), channels: uniq(2) } };
+  return { ok: true, data: {
+    cities:   uniq(CONFIG.FILTERS.city),
+    auditors: uniq(CONFIG.FILTERS.auditor),
+    channels: uniq(CONFIG.FILTERS.channel)
+  } };
 }
 
 /**
@@ -1005,27 +1081,33 @@ function queueList(p, idx, imgs) {
   var hit = cacheGetBig(key);
   if (hit) { try { return JSON.parse(hit); } catch (e) { /* rebuild */ } }
 
-  var wanted = [
-    CONFIG.ID_HEADER, CONFIG.FILTERS.city, CONFIG.FILTERS.auditor,
-    'Select Store ID', 'Select Store Name', CONFIG.FILTERS.channel,
-    '1.9: Shop Status Code'
-  ];
-  var cols = valuesBatchGet(idx.ssId, wanted.map(function (h) { return colRange(idx, h); }), 'COLUMNS').map(firstLine);
-  function cell(c, r) { var v = cols[c] && cols[c][r]; return v === undefined || v === null ? '' : String(v); }
+  var H = {
+    id: CONFIG.ID_HEADER,
+    city: CONFIG.FILTERS.city,
+    auditor: CONFIG.FILTERS.auditor,
+    storeId: 'Select Store ID',
+    storeName: 'Select Store Name',
+    channel: CONFIG.FILTERS.channel,
+    shopStatus: '1.9: Shop Status Code'
+  };
+  var names = Object.keys(H).map(function (k) { return H[k]; });
+  var cols = readNamedColumns(idx, names);   // missing columns come back empty
+  function cell(k, r) { return colCell(cols, H[k], r); }
 
+  var rowCount = (cols[H.id] || []).length;
   var items = [], matched = {};
-  for (var r = 0; r < cols[0].length; r++) {
-    var id = cell(0, r).replace(/\.0$/, '').trim();
+  for (var r = 0; r < rowCount; r++) {
+    var id = cell('id', r).replace(/\.0$/, '').trim();
     if (!id || !imgs[id]) continue;
-    if (p.city    && cell(1, r).trim() !== p.city)    continue;
-    if (p.auditor && cell(2, r).trim() !== p.auditor) continue;
-    if (p.channel && cell(5, r).trim() !== p.channel) continue;
+    if (p.city    && cell('city', r).trim()    !== p.city)    continue;
+    if (p.auditor && cell('auditor', r).trim() !== p.auditor) continue;
+    if (p.channel && cell('channel', r).trim() !== p.channel) continue;
     matched[id] = 1;
     items.push({
       id: id, row: r + 2,
-      city: cell(1, r), auditor: cell(2, r),
-      storeId: cell(3, r), storeName: cell(4, r),
-      channel: cell(5, r), shopStatus: cell(6, r)
+      city: cell('city', r), auditor: cell('auditor', r),
+      storeId: cell('storeId', r), storeName: cell('storeName', r),
+      channel: cell('channel', r), shopStatus: cell('shopStatus', r)
     });
   }
   items.sort(function (a, b) { return Number(a.id) - Number(b.id); });
@@ -1057,20 +1139,21 @@ function getQueue(p) {
   var slice = list.items.slice(offset, offset + limit);
 
   // QC status read fresh (cheap: 3 columns) so done/flagged marks are current
-  var statusCols = valuesBatchGet(idx.ssId, [
-    colRange(idx, qcColName(folderType, 'Status')),
-    colRange(idx, qcColName(folderType, 'User')),
-    colRange(idx, qcColName(folderType, 'End'))
-  ], 'COLUMNS').map(firstLine);                      T.mark('status');
+  var sStatus = qcColName(folderType, 'Status'),
+      sUser   = qcColName(folderType, 'User'),
+      sEnd    = qcColName(folderType, 'End');
+  var statusCols = readNamedColumns(idx, [sStatus, sUser, sEnd]);
+                                                     T.mark('status');
 
   var schema = measureSchema(idx.headers, folderType);
   var mIdx = measureIndexes(idx.headers, folderType);
-  var lo = Math.min.apply(null, mIdx), hi = Math.max.apply(null, mIdx);
   var q = quoteSheet(idx.sheetName);
 
   // one range per row of this page — all fetched in a single call
-  var rowVals = [];
-  if (slice.length) {
+  var rowVals = [], lo = 0, hi = 0;
+  if (slice.length && mIdx.length) {
+    lo = Math.min.apply(null, mIdx);
+    hi = Math.max.apply(null, mIdx);
     rowVals = valuesBatchGet(idx.ssId, slice.map(function (it) {
       return q + '!' + colLetter(lo + 1) + it.row + ':' + colLetter(hi + 1) + it.row;
     })).map(firstLine);
@@ -1079,12 +1162,13 @@ function getQueue(p) {
   var items = slice.map(function (it, k) {
     var span = rowVals[k] || [];
     var si = it.row - 2;
-    function st(c) { var v = statusCols[c] && statusCols[c][si]; return v === undefined || v === null ? '' : String(v); }
     return {
       id: it.id, city: it.city, auditor: it.auditor,
       storeId: it.storeId, storeName: it.storeName, channel: it.channel,
       shopStatus: it.shopStatus,
-      qcStatus: st(0), qcUser: st(1), qcEnd: st(2),
+      qcStatus: colCell(statusCols, sStatus, si),
+      qcUser:   colCell(statusCols, sUser, si),
+      qcEnd:    colCell(statusCols, sEnd, si),
       imageCount: (imgs[it.id] || []).length,
       images: imgs[it.id] || [],
       values: mIdx.map(function (i) {
@@ -1393,12 +1477,12 @@ function getProgress(date) {
   // ids come from the cached index; statuses for every folder type in one call
   var ids = [];
   Object.keys(idx.idToRow).forEach(function (id) { ids[idx.idToRow[id] - 2] = id; });
-  var statusCols = folders.map(function (type) { return colRange(idx, qcColName(type, 'Status')); });
-  var res = idx.lastRow > 1 ? valuesBatchGet(idx.ssId, statusCols, 'COLUMNS') : [];
+  var statusNames = folders.map(function (type) { return qcColName(type, 'Status'); });
+  var res = idx.lastRow > 1 ? readNamedColumns(idx, statusNames) : {};
 
   var result = folders.map(function (type, fi) {
     var imgs = imageMap(date, type);
-    var statuses = firstLine(res[fi]);
+    var statuses = res[statusNames[fi]] || [];
     var done = 0, flagged = 0, matched = 0;
     ids.forEach(function (id, i) {
       if (!id || !imgs[id]) return;
