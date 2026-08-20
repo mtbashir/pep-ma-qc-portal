@@ -23,6 +23,7 @@
     refreshUsers();
     loadDates();
     loadSessions();
+    loadHalves();
   }
 
   async function boot() {
@@ -226,6 +227,88 @@
       toast('Export downloaded ✔', 'ok');
     } catch (e) { toast(e.message, 'err'); }
     finally { this.disabled = false; this.textContent = '⬇ Download QC RD xlsx'; }
+  });
+
+
+  /* ---------------- half-month combined sheet ----------------
+   *
+   * A half-month is ~4,500 rows x ~450 columns, which is more than one Apps
+   * Script execution can move, so the backend does as many dates as fit in
+   * its time budget and reports progress. Keep calling until it says complete.
+   */
+
+  async function loadHalves() {
+    try {
+      var halves = await window.QCApi.call('listHalfMonths', {});
+      var sel = $('half-pick');
+      sel.innerHTML = '<option value="">Select…</option>';
+      halves.forEach(function (h) {
+        var o = document.createElement('option');
+        o.value = h.month + '|' + h.half;
+        o.textContent = h.month + ' ' + h.half + (h.half === 'H1' ? ' (1–15)' : ' (16–end)') +
+                        (h.built ? '  ✔ built' : '');
+        if (h.url) o.dataset.url = h.url;
+        sel.appendChild(o);
+      });
+    } catch (e) { /* non-fatal — the rest of the page still works */ }
+  }
+
+  $('half-pick').addEventListener('change', function () {
+    $('btn-half-build').disabled = !this.value;
+    var opt = this.selectedOptions[0];
+    var link = $('half-link');
+    if (opt && opt.dataset.url) { link.href = opt.dataset.url; link.classList.remove('hidden'); }
+    else link.classList.add('hidden');
+  });
+
+  $('btn-half-build').addEventListener('click', async function () {
+    var v = $('half-pick').value;
+    if (!v) return;
+    var parts = v.split('|'), month = parts[0], half = parts[1];
+    var btn = this;
+    btn.disabled = true;
+    $('half-track').classList.remove('hidden');
+    $('half-status').classList.remove('hidden');
+    $('half-bar').style.width = '0%';
+
+    var reset = true, guard = 0, r = null;
+    try {
+      while (guard++ < 40) {
+        btn.textContent = 'Building… ' + (r ? r.done + '/' + r.total : '');
+        r = await window.QCApi.call('buildHalfMonth', { month: month, half: half, reset: reset });
+        reset = false;
+        $('half-bar').style.width = (r.total ? Math.round(100 * r.done / r.total) : 0) + '%';
+        $('half-status').textContent = r.done + ' of ' + r.total + ' dates · ' +
+          r.rows + ' rows · ' + r.columns + ' columns';
+        if (r.complete) break;
+      }
+      if (!r || !r.complete) {
+        toast('Still going — press Build again to continue where it stopped.', 'err');
+        return;
+      }
+      $('half-link').href = r.url;
+      $('half-link').classList.remove('hidden');
+      var notes = [];
+      if (r.extraColumnCount) {
+        notes.push(r.extraColumnCount + ' column(s) kept from earlier days');
+      }
+      if (r.datesMissingQcSheet && r.datesMissingQcSheet.length) {
+        notes.push(r.datesMissingQcSheet.length + ' date(s) skipped (no QC sheet): ' +
+                   r.datesMissingQcSheet.join(', '));
+      }
+      $('half-status').textContent = r.name + ' — ' + r.rows + ' rows × ' + r.columns +
+        ' columns from ' + r.done + ' date(s), layout from ' + r.latest +
+        (notes.length ? '. ' + notes.join('. ') + '.' : '.');
+      toast('Combined sheet ready ✔', 'ok');
+      loadHalves();
+    } catch (e) {
+      if (e.staleSession) return;
+      toast(e.message, 'err');
+      if (e.auth) showLogin();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '▣ Build / rebuild';
+    }
   });
 
   /* ---------------- toast ---------------- */

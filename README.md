@@ -130,6 +130,61 @@ automatically whenever a direct load fails, so it is safe to leave on.
    time. Admins additionally get a **User sessions** report on the admin page
    with one row per sign-in session.
 
+## Half-month combined sheet
+
+QC produces one `QC RD <date>` sheet per day. For reporting, each month is also
+combined into two half-month files in the **same** `PEP MA QC OUTPUT` folder:
+
+| File | Covers |
+|------|--------|
+| `QC RD 2026-08-H1` | 1st – 15th |
+| `QC RD 2026-08-H2` | 16th – end of month (28 / 29 / 30 / 31) |
+
+**Column layout comes from the latest date in the half.** Kobo questions get
+added and removed mid-month — Aug 1 2026 had 401 Kobo columns, Aug 2 onwards had
+418 — so a fixed layout is not possible. The combined file is laid out as:
+
+```
+[ every column of the latest date's QC sheet, in its order ]  [ QC Source Date ]  [ extras ]
+```
+
+* **extras** are columns an older day had that the latest one no longer does.
+  They are kept at the far end instead of being dropped, so a mid-month question
+  change never silently loses data. For August H1 that is two columns —
+  `Other (please specify the Store ID)` and
+  `Other (please specify the Store Name and Address)`, both from Aug 1.
+* **`QC Source Date`** holds the `QC RD <date>` each row came from.
+* Rows are matched to columns **by header name**, never by position. A column the
+  latest date has but an older day lacks comes through blank.
+* Dates with no QC sheet yet (never opened in the portal) are **skipped**, and
+  reported back so you know which ones to open and refresh first.
+
+### Running it
+
+Admin page → **Half-month combined sheet** → pick the half → **Build / rebuild**.
+
+A rebuild **reuses the same file**, wiping and refilling it, so a link you have
+shared or bookmarked keeps working. Because the file is emptied at the start of a
+rebuild, it is briefly incomplete while one is running.
+
+A half-month is roughly 4,500 rows × 450 columns — far more than one Apps Script
+execution can move. The build is therefore **resumable**: each request processes
+as many dates as fit in `CONFIG.HALF_BUDGET_MS` (4 minutes), records progress in
+Script Properties, and returns `done / total`. The admin page just keeps calling
+until it reports `complete`, and every call is guaranteed to advance by at least
+one date.
+
+### Nightly rebuild
+
+`installHalfMonthTrigger()` — run once from the Apps Script editor — installs a
+daily ~02:00 trigger that rebuilds the **current** half-month. Time-based
+triggers get the same 6-minute ceiling, so the run books itself a one-off
+continuation a minute later until it finishes.
+
+Just after a half turns over, the one that closed is usually still being QC'd, so
+on days 1–5 the previous month's H2 is refreshed too, and on days 16–20 the same
+month's H1 is. Older halves are rebuilt on demand with the admin button.
+
 ## Performance notes
 
 The backend is tuned for a ~400-row × ~400-column Kobo sheet and ~900 photos
@@ -166,7 +221,7 @@ update automatically:
 
 ```
 index.html          QC portal (login + queue + photo viewer + editable measures)
-admin.html          Admin portal (users, progress, export)
+admin.html          Admin portal (users, progress, export, half-month combine)
 css/styles.css
 js/config.js        ← paste your Apps Script web app URL here
 js/api.js           API client (+ built-in demo mode)

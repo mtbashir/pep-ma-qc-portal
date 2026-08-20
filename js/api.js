@@ -220,6 +220,12 @@
           { folderType: 'STORES PHOTOS', images: 399, matched: 399, done: 0, flagged: 0, pending: 399 },
           { folderType: 'MT SHELVES', images: 8, matched: 8, done: 8, flagged: 0, pending: 0 }
         ] };
+      case 'listHalfMonths': return [{ month: '2026-07', half: 'H1', built: false, url: '' }];
+      case 'buildHalfMonth':
+        return { month: p.month, half: p.half, name: 'QC RD ' + p.month + '-' + p.half, url: '#',
+                 latest: p.month + '-15', total: 2, done: 2, remaining: 0, complete: true,
+                 rows: DEMO_QUEUE.length, columns: 12, datesMissingQcSheet: [],
+                 extraColumns: [], extraColumnCount: 0 };
       case 'exportQc': throw new Error('Export is not available in demo mode');
       default: throw new Error('Unknown demo action ' + action);
     }

@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '3.5',
+  VERSION: '3.7',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -34,6 +34,13 @@ var CONFIG = {
   OUTPUT_FOLDER_NAME: 'PEP MA QC OUTPUT',  // folder that receives the QC RD copies
   QC_SHEET_PREFIX: 'QC RD ',               // per-date QC copy name = prefix + date
   KOBO_FILE_PREFIX: 'KOBO RD',             // source excel name inside each date folder
+
+  // Half-month combined sheets: "QC RD <YYYY-MM>-H1" (1st-15th) and "-H2"
+  // (16th-end of month). A build stops adding dates after HALF_BUDGET_MS so it
+  // stays inside one execution, and the next call resumes where it stopped.
+  SOURCE_DATE_HEADER: 'QC Source Date',
+  HALF_BUDGET_MS: 240000,
+  HALF_APPEND_CELLS: 50000,
 
   SESSION_HOURS: 12,
   DEFAULT_ADMIN: { username: 'admin', password: 'ChangeMe123!', displayName: 'Administrator' },
@@ -298,6 +305,8 @@ function route(p) {
     case 'getProgress':  return getProgress(p.date);
     case 'exportQc':     return exportQc(p.date);
     case 'listSessions': return listSessions();
+    case 'listHalfMonths': return listHalfMonths();
+    case 'buildHalfMonth': return buildHalfMonth(p);
   }
   throw new Error('Unknown action: ' + action);
 }
@@ -1513,6 +1522,472 @@ function exportQc(date) {
     base64: Utilities.base64Encode(resp.getContent())
   } };
 }
+
+/* ------------------------------------------------------------------ *
+ *  Half-month combined sheet  ("QC RD <YYYY-MM>-H1" / "-H2")
+ *
+ *  Stacks every "QC RD <date>" sheet of one half of a month into a single
+ *  spreadsheet in the same output folder. H1 is the 1st-15th, H2 is the
+ *  16th to the end of that month (28/29/30/31, whichever it is).
+ *
+ *  COLUMNS come from the LATEST date in the half, because Kobo questions
+ *  get added and removed mid-month. Columns 1..N are exactly that sheet's
+ *  headers in its order, then "QC Source Date", then any column an older
+ *  day had that the latest one no longer does — kept rather than dropped,
+ *  so a mid-month question change never silently loses data.
+ *
+ *  ROWS are matched to columns BY HEADER NAME, never by position. A column
+ *  the latest has but an older day lacks comes through blank.
+ *
+ *  A half-month is roughly 4,500 rows x 450 columns, far too much for one
+ *  6-minute execution, so a build is RESUMABLE: each call works through as
+ *  many dates as fit in HALF_BUDGET_MS, records which dates are done in
+ *  Script Properties, and returns progress. Call it again with the same
+ *  month/half and reset:false to carry on where it stopped.
+ * ------------------------------------------------------------------ */
+
+function hasOwn(obj, key) { return Object.prototype.hasOwnProperty.call(obj, key); }
+
+/** 'H1' for days 1-15, 'H2' for 16 onwards. */
+function halfOfDay(day) { return Number(day) <= 15 ? 'H1' : 'H2'; }
+
+/** 'QC RD 2026-08-H1' */
+function halfMonthName(month, half) {
+  return CONFIG.QC_SHEET_PREFIX + month + '-' + half;
+}
+
+function daysInMonth(month) {
+  return new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0).getDate();
+}
+
+/** Every calendar date in one half-month, ascending. */
+function halfMonthDates(month, half) {
+  if (!/^\d{4}-\d{2}$/.test(String(month))) throw new Error('Invalid month "' + month + '" (expected YYYY-MM)');
+  if (half !== 'H1' && half !== 'H2') throw new Error('Invalid half "' + half + '" (expected H1 or H2)');
+  var from = half === 'H1' ? 1 : 16;
+  var to   = half === 'H1' ? 15 : daysInMonth(month);
+  var out = [];
+  for (var d = from; d <= to; d++) out.push(month + '-' + (d < 10 ? '0' + d : String(d)));
+  return out;
+}
+
+/** name -> fileId for every Google Sheet in the QC output folder. */
+function qcFilesByName() {
+  var map = {};
+  driveList(outputFolder().getId()).forEach(function (f) {
+    if (f.mimeType === 'application/vnd.google-apps.spreadsheet') map[f.name.trim()] = f.id;
+  });
+  return map;
+}
+
+/** First tab's id, name and grid size, in one call where possible. */
+function hmSheetProps(ssId) {
+  if (sheetsReady()) {
+    try {
+      var meta = Sheets.Spreadsheets.get(ssId, {
+        fields: 'sheets.properties(sheetId,title,gridProperties(rowCount,columnCount))'
+      });
+      var p = meta.sheets[0].properties;
+      return { sheetId: p.sheetId, title: p.title,
+               rows: p.gridProperties.rowCount, cols: p.gridProperties.columnCount };
+    } catch (e) { sheetsFailed(e); }
+  }
+  var sh = openSs(ssId).getSheets()[0];
+  return { sheetId: sh.getSheetId(), title: sh.getName(),
+           rows: sh.getMaxRows(), cols: sh.getMaxColumns() };
+}
+
+/** Header row of a QC sheet, trailing blanks trimmed. */
+function hmHeaders(ssId, title) {
+  var t = title || hmSheetProps(ssId).title;
+  var h = firstLine(valuesBatchGet(ssId, [quoteSheet(t) + '!1:1'])[0]).map(String);
+  while (h.length && h[h.length - 1] === '') h.pop();
+  return h;
+}
+
+/**
+ * Works out which dates go in and the exact column layout of the combined
+ * sheet. Costs one header read per date in the half.
+ */
+function hmPlan(month, half) {
+  var byName = qcFilesByName();
+  var dates = [], missing = [];
+  halfMonthDates(month, half).forEach(function (d) {
+    var id = byName[CONFIG.QC_SHEET_PREFIX + d];
+    if (id) dates.push({ date: d, ssId: id }); else missing.push(d);
+  });
+  if (!dates.length) {
+    throw new Error('No QC sheets exist yet for ' + month + ' ' + half +
+      '. Open those dates in the QC portal first — a QC sheet is only created when a date is first opened.');
+  }
+
+  var latest = dates[dates.length - 1];          // halfMonthDates() is ascending
+  var headers = hmHeaders(latest.ssId);
+  if (!headers.length) throw new Error('The latest QC sheet (' + latest.date + ') has an empty header row');
+
+  var seen = {};
+  headers.forEach(function (h) { seen[h] = true; });
+  if (!hasOwn(seen, CONFIG.SOURCE_DATE_HEADER)) {
+    headers.push(CONFIG.SOURCE_DATE_HEADER);
+    seen[CONFIG.SOURCE_DATE_HEADER] = true;
+  }
+
+  var extras = [];
+  dates.forEach(function (d) {
+    if (d.date === latest.date) return;
+    hmHeaders(d.ssId).forEach(function (h) {
+      if (!h || hasOwn(seen, h)) return;
+      seen[h] = true;
+      extras.push(h);
+      headers.push(h);
+    });
+  });
+
+  return { dates: dates, latest: latest.date, latestSsId: latest.ssId,
+           missing: missing, headers: headers, extras: extras };
+}
+
+function hmClearAll(ssId, props) {
+  if (sheetsReady()) {
+    try { Sheets.Spreadsheets.Values.clear({}, ssId, quoteSheet(props.title)); return; }
+    catch (e) { sheetsFailed(e); }
+  }
+  openSs(ssId).getSheetByName(props.title).clearContents();
+}
+
+function hmEnsureGrid(ssId, props, cols) {
+  if (props.cols >= cols) return;
+  if (sheetsReady()) {
+    try {
+      Sheets.Spreadsheets.batchUpdate({ requests: [{
+        updateSheetProperties: {
+          properties: { sheetId: props.sheetId, gridProperties: { columnCount: cols } },
+          fields: 'gridProperties.columnCount'
+        }
+      }] }, ssId);
+      props.cols = cols;
+      return;
+    } catch (e) { sheetsFailed(e); }
+  }
+  var sh = openSs(ssId).getSheetByName(props.title);
+  sh.insertColumnsAfter(sh.getMaxColumns(), cols - sh.getMaxColumns());
+  props.cols = cols;
+}
+
+/**
+ * The combined spreadsheet, emptied and ready for rows.
+ *
+ * An existing file is reused and wiped rather than replaced, so the link
+ * people have bookmarked keeps working across rebuilds.
+ */
+function hmPrepareTarget(month, half, plan) {
+  var folderId = outputFolder().getId();
+  var name = halfMonthName(month, half);
+  var existing = driveList(folderId).filter(function (f) {
+    return f.name.trim() === name && f.mimeType === 'application/vnd.google-apps.spreadsheet';
+  })[0];
+
+  var ssId;
+  if (existing) {
+    ssId = existing.id;
+  } else {
+    // Copying the latest date's sheet carries its column formatting across;
+    // the rows that come with it are wiped immediately below.
+    ssId = Drive.Files.copy(
+      { name: name, mimeType: 'application/vnd.google-apps.spreadsheet', parents: [folderId] },
+      plan.latestSsId, { supportsAllDrives: true }
+    ).id;
+  }
+
+  var props = hmSheetProps(ssId);
+  hmClearAll(ssId, props);
+  hmEnsureGrid(ssId, props, plan.headers.length);
+  valuesBatchUpdate(ssId, [{ range: quoteSheet(props.title) + '!A1', values: [plan.headers] }]);
+  return { ssId: ssId, tab: props.title };
+}
+
+function hmStateKey(month, half) { return 'HM|' + month + '|' + half; }
+
+function hmGetState(month, half) {
+  var raw = PROPS.getProperty(hmStateKey(month, half));
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
+
+function hmSetState(st) { PROPS.setProperty(hmStateKey(st.month, st.half), JSON.stringify(st)); }
+
+/** Wipes the target and records the plan. Nothing is appended yet. */
+function hmStart(month, half) {
+  var plan = hmPlan(month, half);
+  var target = hmPrepareTarget(month, half, plan);
+  var ids = {};
+  plan.dates.forEach(function (d) { ids[d.date] = d.ssId; });
+  return {
+    month: month, half: half,
+    ssId: target.ssId, tab: target.tab,
+    latest: plan.latest,
+    dates: plan.dates.map(function (d) { return d.date; }),
+    ids: ids,
+    done: [], rows: 0,
+    missing: plan.missing,
+    cols: plan.headers.length,
+    // kept for the report only; the sheet's own row 1 is the real header list
+    extras: plan.extras.slice(0, 10),
+    extrasCount: plan.extras.length,
+    startedAt: new Date().toISOString()
+  };
+}
+
+/** Appends rows in chunks small enough to stay inside one API request. */
+function hmAppendRows(st, rows, width) {
+  if (!rows.length) return;
+  var per = Math.max(1, Math.floor(CONFIG.HALF_APPEND_CELLS / Math.max(1, width)));
+  for (var i = 0; i < rows.length; i += per) {
+    var chunk = rows.slice(i, i + per);
+    var wrote = false;
+    if (sheetsReady()) {
+      try {
+        Sheets.Spreadsheets.Values.append({ values: chunk }, st.ssId, quoteSheet(st.tab) + '!A1',
+          { valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS' });
+        wrote = true;
+      } catch (e) { sheetsFailed(e); }
+    }
+    if (!wrote) {
+      var sh = openSs(st.ssId).getSheetByName(st.tab);
+      var start = sh.getLastRow() + 1;
+      var need = start + chunk.length - 1;
+      if (sh.getMaxRows() < need) sh.insertRowsAfter(sh.getMaxRows(), need - sh.getMaxRows());
+      sh.getRange(start, 1, chunk.length, width).setValues(chunk);
+      SpreadsheetApp.flush();
+    }
+  }
+}
+
+/** Reads one date's QC sheet and appends its rows, remapped by header name. */
+function hmAppendDate(st, date, headers, index) {
+  var srcId = st.ids[date];
+  var srcTitle = hmSheetProps(srcId).title;
+  var got = valuesBatchGet(srcId, [quoteSheet(srcTitle)]);
+  var rows = (got[0] && got[0].values) || [];
+  if (rows.length < 2) return 0;
+
+  var srcHeaders = rows[0].map(String);
+  // source column -> combined column. hmPlan() gave every stray column a home,
+  // so -1 only happens if the source sheet changed since the build started.
+  var map = srcHeaders.map(function (h) { return hasOwn(index, h) ? index[h] : -1; });
+  var dateCol = hasOwn(index, CONFIG.SOURCE_DATE_HEADER) ? index[CONFIG.SOURCE_DATE_HEADER] : -1;
+  var idCol = srcHeaders.indexOf(CONFIG.ID_HEADER);
+  var width = headers.length;
+
+  var out = [];
+  for (var r = 1; r < rows.length; r++) {
+    var src = rows[r];
+    // a QC sheet's grid is usually taller than its data; skip the blank tail
+    if (idCol !== -1) {
+      var id = src[idCol];
+      if (id === undefined || id === null || String(id).trim() === '') continue;
+    }
+    var line = new Array(width);
+    for (var c = 0; c < width; c++) line[c] = '';
+    var n = Math.min(src.length, map.length);
+    for (var s = 0; s < n; s++) {
+      var dst = map[s];
+      if (dst >= 0 && src[s] !== undefined && src[s] !== null) line[dst] = src[s];
+    }
+    if (dateCol >= 0) line[dateCol] = date;
+    out.push(line);
+  }
+
+  hmAppendRows(st, out, width);
+  return out.length;
+}
+
+/** Processes pending dates until the time budget runs out. */
+function hmRunBudget(st, budgetMs) {
+  var t0 = Date.now();
+  var headers = hmHeaders(st.ssId, st.tab);
+  var index = {};
+  headers.forEach(function (h, i) { if (!hasOwn(index, h)) index[h] = i; });
+
+  var doneSet = {};
+  st.done.forEach(function (d) { doneSet[d] = true; });
+
+  // Always finish at least one date, even if the budget is already gone by the
+  // time we get here — otherwise a call can return having done nothing at all
+  // and the build never advances, however many times it is retried.
+  var processed = 0;
+  for (var i = 0; i < st.dates.length; i++) {
+    var date = st.dates[i];
+    if (hasOwn(doneSet, date)) continue;
+    if (processed > 0 && Date.now() - t0 > budgetMs) break;
+    st.rows += hmAppendDate(st, date, headers, index);
+    st.done.push(date);
+    doneSet[date] = true;
+    processed++;
+  }
+  return st;
+}
+
+function hmReport(st) {
+  return {
+    month: st.month, half: st.half,
+    name: halfMonthName(st.month, st.half),
+    url: 'https://docs.google.com/spreadsheets/d/' + st.ssId + '/edit',
+    latest: st.latest,
+    total: st.dates.length,
+    done: st.done.length,
+    remaining: st.dates.length - st.done.length,
+    complete: st.done.length >= st.dates.length,
+    rows: st.rows,
+    columns: st.cols,
+    datesMissingQcSheet: st.missing,
+    extraColumns: st.extras,
+    extraColumnCount: st.extrasCount
+  };
+}
+
+/**
+ * Build (or continue building) one half-month file.
+ *   p = { month: 'YYYY-MM', half: 'H1'|'H2', reset: true on the first call }
+ * Returns progress; keep calling with reset:false until data.complete.
+ */
+function buildHalfMonth(p) {
+  var month = String(p.month || '').trim();
+  var half = String(p.half || '').trim().toUpperCase();
+  halfMonthDates(month, half);                     // validates both
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    throw new Error('Another half-month build is running — wait for it to finish, then try again.');
+  }
+  try {
+    var st = p.reset ? null : hmGetState(month, half);
+    if (!st) st = hmStart(month, half);
+    st = hmRunBudget(st, CONFIG.HALF_BUDGET_MS);
+    hmSetState(st);
+    return { ok: true, data: hmReport(st) };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Every half-month that has photo dates, newest first, flagged if built. */
+function listHalfMonths() {
+  var byName = qcFilesByName();
+  var seen = {}, out = [];
+  getDates().data.forEach(function (d) {
+    var month = d.slice(0, 7), half = halfOfDay(d.slice(8, 10));
+    var key = month + '|' + half;
+    if (hasOwn(seen, key)) return;
+    seen[key] = true;
+    var id = byName[halfMonthName(month, half)];
+    out.push({
+      month: month, half: half, built: !!id,
+      url: id ? 'https://docs.google.com/spreadsheets/d/' + id + '/edit' : ''
+    });
+  });
+  return { ok: true, data: out };
+}
+
+/* ---- nightly rebuild ------------------------------------------------ *
+ *
+ *  A time-based trigger gets the same 6-minute ceiling as everything else,
+ *  so the nightly run does one budgeted pass and then books itself a
+ *  one-off trigger a minute later to continue, until the queue is empty.
+ * -------------------------------------------------------------------- */
+
+function nightlyRebuildHalfMonth() {
+  var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  var month = today.slice(0, 7), day = Number(today.slice(8, 10));
+  var queue = [{ month: month, half: halfOfDay(day) }];
+
+  // Just after a half turns over the closed one is usually still being QC'd,
+  // so keep refreshing it for a few more days.
+  if (day <= 5) {
+    var y = Number(month.slice(0, 4)), m = Number(month.slice(5, 7)) - 1;
+    if (m === 0) { m = 12; y -= 1; }
+    queue.push({ month: y + '-' + (m < 10 ? '0' + m : String(m)), half: 'H2' });
+  } else if (day >= 16 && day <= 20) {
+    queue.push({ month: month, half: 'H1' });
+  }
+
+  PROPS.setProperty('HM_AUTO', JSON.stringify({ queue: queue, tries: 0, fresh: true }));
+  hmAutoStep();
+}
+
+function hmContinue() {
+  hmDropContinuations();
+  hmAutoStep();
+}
+
+function hmAutoStep() {
+  var raw = PROPS.getProperty('HM_AUTO');
+  if (!raw) return;
+  var auto;
+  try { auto = JSON.parse(raw); } catch (e) { PROPS.deleteProperty('HM_AUTO'); return; }
+  if (!auto.queue || !auto.queue.length || auto.tries > 24) {
+    PROPS.deleteProperty('HM_AUTO');
+    return;
+  }
+
+  var job = auto.queue[0];
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {          // a manual build is in progress; wait it out
+    auto.tries++;
+    PROPS.setProperty('HM_AUTO', JSON.stringify(auto));
+    hmScheduleContinuation();
+    return;
+  }
+  try {
+    var st = auto.fresh ? null : hmGetState(job.month, job.half);
+    if (!st) st = hmStart(job.month, job.half);
+    st = hmRunBudget(st, CONFIG.HALF_BUDGET_MS);
+    hmSetState(st);
+    auto.fresh = false;
+    if (st.done.length >= st.dates.length) { auto.queue.shift(); auto.fresh = true; }
+  } catch (e) {
+    // A half with no QC sheets yet lands here; drop it and move on.
+    console.warn('nightly rebuild of ' + job.month + ' ' + job.half + ' skipped: ' + (e && e.message));
+    auto.queue.shift();
+    auto.fresh = true;
+  } finally {
+    lock.releaseLock();
+  }
+
+  auto.tries++;
+  if (!auto.queue.length) {
+    PROPS.deleteProperty('HM_AUTO');
+    hmDropContinuations();
+    return;
+  }
+  PROPS.setProperty('HM_AUTO', JSON.stringify(auto));
+  hmScheduleContinuation();
+}
+
+function hmScheduleContinuation() {
+  ScriptApp.newTrigger('hmContinue').timeBased().after(60 * 1000).create();
+}
+
+function hmDropContinuations() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'hmContinue') ScriptApp.deleteTrigger(t);
+  });
+}
+
+/**
+ * Run once from the editor to install (or re-install) the nightly rebuild.
+ * Safe to run again; it clears any previous copy of the trigger first.
+ */
+function installHalfMonthTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'nightlyRebuildHalfMonth') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('nightlyRebuildHalfMonth').timeBased().atHour(2).everyDays(1).create();
+  var msg = 'Nightly half-month rebuild installed for ~02:00 ' + Session.getScriptTimeZone();
+  console.log(msg);
+  return msg;
+}
+
 
 /* ------------------------------------------------------------------ *
  *  Utils

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PEP MA QC — Admin</title>
-<link rel="stylesheet" href="css/styles.css?v=10">
+<link rel="stylesheet" href="css/styles.css?v=11">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚙</text></svg>">
 </head>
 <body>
@@ -93,13 +93,35 @@
       </table>
     </div>
 
+
+    <div class="card">
+      <h2>Half-month combined sheet</h2>
+      <p class="card-sub">
+        Stacks every QC RD sheet of one half-month into a single
+        <b>QC RD YYYY-MM-H1</b> (1st&ndash;15th) or <b>-H2</b> (16th&ndash;end of month)
+        file in the same folder. Columns follow the latest date in that half;
+        anything an older day had that the latest no longer does is kept at the
+        far end, and every row carries a <b>QC Source Date</b>. Rebuilding
+        replaces the contents of the same file, so the link never changes.
+      </p>
+      <div class="form-row" style="margin-bottom:12px">
+        <label>Half-month <select id="half-pick"><option value="">Select&hellip;</option></select></label>
+        <button id="btn-half-build" class="btn btn-primary" disabled>&#9635; Build / rebuild</button>
+        <a id="half-link" class="btn hidden" target="_blank" rel="noopener">Open combined sheet</a>
+      </div>
+      <div class="progress-track hidden" id="half-track" style="max-width:420px;margin-bottom:8px">
+        <div class="progress-done" id="half-bar" style="width:0%"></div>
+      </div>
+      <div id="half-status" class="card-sub hidden"></div>
+    </div>
+
   </main>
   <div id="toast" class="toast hidden"></div>
 </div>
 
 <!-- bump ?v= on every release so browsers never run a stale cached script -->
-<script src="js/config.js?v=10"></script>
-<script src="js/api.js?v=10"></script>
-<script src="js/admin.js?v=10"></script>
+<script src="js/config.js?v=11"></script>
+<script src="js/api.js?v=11"></script>
+<script src="js/admin.js?v=11"></script>
 </body>
 </html>
