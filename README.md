@@ -188,6 +188,17 @@ Script Properties, and returns `done / total`. The admin page just keeps calling
 until it reports `complete`, and every call is guaranteed to advance by at least
 one date.
 
+The budget is **predictive, not reactive**: a date is only started if the
+previous one's duration says it will finish in time. Checking elapsed time alone
+lets a date begin at 3:59 and get killed at the 6-minute ceiling part way
+through writing. For the same reason the nightly job's combine and reporting
+passes share one budget rather than getting 300 s each.
+
+Pressing **Build / rebuild** on a half that stopped part way **resumes** it. The
+backend decides: a finished build (or one older than `HALF_RESUME_MAX_MS`, 6 h)
+starts over, anything still in progress carries on. The frontend never forces a
+reset, so pressing the button again can't wipe a half-finished file.
+
 Progress is saved after **every** date, and a date is marked pending before any
 of its rows are written. Appends are durable the moment they land, so an
 execution killed part way through a date would otherwise leave orphan rows that

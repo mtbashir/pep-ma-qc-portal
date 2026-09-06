@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '4.0',
+  VERSION: '4.1',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -39,7 +39,11 @@ var CONFIG = {
   // (16th-end of month). A build stops adding dates after HALF_BUDGET_MS so it
   // stays inside one execution, and the next call resumes where it stopped.
   SOURCE_DATE_HEADER: 'QC Source Date',
-  HALF_BUDGET_MS: 240000,
+  // Hard ceiling for one execution is 6 minutes. Work stops well before that,
+  // and a date is only started if the previous one's duration suggests it will
+  // finish — starting a slow date late is how a run gets killed mid-write.
+  HALF_BUDGET_MS: 300000,
+  HALF_MIN_SLICE_MS: 20000,
   HALF_APPEND_CELLS: 50000,
   // Refresh each date's QC sheet from its Kobo workbook before combining it.
   // QC sheets are snapshots taken when a date is first opened, so without this
@@ -52,6 +56,7 @@ var CONFIG = {
   REPORT_SHEET_PREFIX: 'REPORTING ',
   REPORT_CHUNK_CELLS: 90000,
   REPORT_STRICT: true,        // stop rather than emit a report built on a shifted layout
+  HALF_RESUME_MAX_MS: 21600000,   // 6 h; older unfinished builds start over
 
   SESSION_HOURS: 12,
   DEFAULT_ADMIN: { username: 'admin', password: 'ChangeMe123!', displayName: 'Administrator' },
@@ -1934,11 +1939,16 @@ function hmRunBudget(st, budgetMs) {
   // Always finish at least one date, even if the budget is already gone by the
   // time we get here — otherwise a call can return having done nothing at all
   // and the build never advances, however many times it is retried.
-  var processed = 0;
+  var processed = 0, lastMs = 0;
   for (var i = 0; i < st.dates.length; i++) {
     var date = st.dates[i];
     if (hasOwn(doneSet, date)) continue;
-    if (processed > 0 && Date.now() - t0 > budgetMs) break;
+    // Predictive, not reactive: a date takes as long as the last one did, so
+    // only begin if that much time is still left. Checking elapsed time alone
+    // lets a date start at 3:59 and get killed at 6:00 part way through.
+    var elapsed = Date.now() - t0;
+    if (processed > 0 && elapsed + Math.max(lastMs, CONFIG.HALF_MIN_SLICE_MS) > budgetMs) break;
+    var sliceStart = Date.now();
 
     if (CONFIG.HALF_REFRESH) st.refreshed += hmRefreshDate(st, date);
 
@@ -1952,6 +1962,7 @@ function hmRunBudget(st, budgetMs) {
     doneSet[date] = true;
     st.pending = '';
     hmSetState(st);          // per date, so a timeout cannot lose finished dates
+    lastMs = Date.now() - sliceStart;
     processed++;
   }
   return st;
@@ -1967,6 +1978,7 @@ function hmReport(st) {
     done: st.done.length,
     remaining: st.dates.length - st.done.length,
     complete: st.done.length >= st.dates.length,
+    resumed: !!st.resumed,
     rows: st.rows,
     columns: st.cols,
     datesMissingQcSheet: st.missing,
@@ -1976,6 +1988,23 @@ function hmReport(st) {
     extraColumns: st.extras,
     extraColumnCount: st.extrasCount
   };
+}
+
+/**
+ * The state to carry on from, or null to start a fresh build.
+ *
+ * A finished build means the next press is a deliberate rebuild. A very old
+ * one is not worth resuming — the dates in it are probably out of date — and
+ * anything still in progress is resumed, so pressing the button again after an
+ * interrupted run continues it instead of wiping what it already wrote.
+ */
+function hmResumable(month, half) {
+  var st = hmGetState(month, half);
+  if (!st) return null;
+  if (!st.dates || st.done.length >= st.dates.length) return null;   // complete -> rebuild
+  var age = new Date().getTime() - new Date(st.startedAt || 0).getTime();
+  if (!(age >= 0) || age > CONFIG.HALF_RESUME_MAX_MS) return null;   // stale -> rebuild
+  return st;
 }
 
 /**
@@ -1993,9 +2022,11 @@ function buildHalfMonth(p) {
     throw new Error('Another half-month build is running — wait for it to finish, then try again.');
   }
   try {
-    var st = p.reset ? null : hmGetState(month, half);
+    var st = p.reset ? null : hmResumable(month, half);
+    var resumed = !!st;
     if (!st) st = hmStart(month, half);
     st = hmRunBudget(st, CONFIG.HALF_BUDGET_MS);
+    st.resumed = resumed;
     hmSetState(st);
     return { ok: true, data: hmReport(st) };
   } finally {
@@ -2063,6 +2094,7 @@ function hmAutoStep() {
   }
 
   var job = auto.queue[0];
+  var stepStart = Date.now();          // combine and reporting share ONE execution
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) {          // a manual build is in progress; wait it out
     auto.tries++;
@@ -2078,12 +2110,20 @@ function hmAutoStep() {
     auto.fresh = false;
     if (st.done.length >= st.dates.length) {
       // The half-month file is finished, so refresh the reporting cut of it
-      // before moving on. Budgeted the same way; a failure here must not cost
-      // us the combine that just succeeded.
+      // before moving on. Whatever the combine already spent comes off this
+      // pass, or the two together would sail past the 6-minute ceiling. A
+      // failure here must not cost us the combine that just succeeded.
+      var left = CONFIG.HALF_BUDGET_MS - (Date.now() - stepStart);
       try {
+        if (left < CONFIG.HALF_MIN_SLICE_MS) {
+          hmScheduleContinuation();     // no room left; carry on in a minute
+          auto.tries++;
+          PROPS.setProperty('HM_AUTO', JSON.stringify(auto));
+          return;
+        }
         var rst = auto.rpFresh === false ? rpGetState(job.month, job.half) : null;
         if (!rst) rst = rpStart(job.month, job.half);
-        rst = rpRunBudget(rst, CONFIG.HALF_BUDGET_MS);
+        rst = rpRunBudget(rst, left);
         rpSetState(rst);
         auto.rpFresh = false;
         if (rst.nextRow > rst.srcRows) { auto.queue.shift(); auto.fresh = true; auto.rpFresh = true; }
@@ -2308,12 +2348,15 @@ function rpRunBudget(st, budgetMs) {
   var srcHeaders = hmHeaders(st.srcId, st.srcTab);
   var dateCol = srcHeaders.indexOf(CONFIG.SOURCE_DATE_HEADER) + 1;   // 0 if absent
 
-  var did = 0;
+  var did = 0, lastMs = 0;
   while (st.nextRow <= st.srcRows) {
-    if (did > 0 && Date.now() - t0 > budgetMs) break;
+    var elapsed = Date.now() - t0;
+    if (did > 0 && elapsed + Math.max(lastMs, CONFIG.HALF_MIN_SLICE_MS) > budgetMs) break;
+    var sliceStart = Date.now();
     if (!rpCopyChunk(st, dateCol)) break;
-    did++;
     rpSetState(st);            // per chunk, so a timeout cannot lose the work
+    lastMs = Date.now() - sliceStart;
+    did++;
   }
   return st;
 }
@@ -2348,6 +2391,11 @@ function buildReporting(p) {
   }
   try {
     var st = p.reset ? null : rpGetState(month, half);
+    if (st && (st.nextRow > st.srcRows)) st = null;                  // finished -> rebuild
+    if (st) {
+      var rAge = new Date().getTime() - new Date(st.startedAt || 0).getTime();
+      if (!(rAge >= 0) || rAge > CONFIG.HALF_RESUME_MAX_MS) st = null;
+    }
     if (!st) st = rpStart(month, half);
     st = rpRunBudget(st, CONFIG.HALF_BUDGET_MS);
     rpSetState(st);

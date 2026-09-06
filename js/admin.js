@@ -272,19 +272,22 @@
     $('half-bar').style.width = '0%';
     $('report-link').classList.add('hidden');
 
-    var reset = true, guard = 0, r = null;
+    // Never force a reset: the backend starts fresh when the last build for
+    // this half finished (or is stale) and resumes it otherwise, so pressing
+    // Build after an interrupted run continues instead of wiping it.
+    var guard = 0, r = null;
     try {
-      while (guard++ < 40) {
+      while (guard++ < 80) {
         btn.textContent = 'Building… ' + (r ? r.done + '/' + r.total : '');   // slow: each date is refreshed first
-        r = await window.QCApi.call('buildHalfMonth', { month: month, half: half, reset: reset });
-        reset = false;
+        r = await window.QCApi.call('buildHalfMonth', { month: month, half: half });
         $('half-bar').style.width = (r.total ? Math.round(100 * r.done / r.total) : 0) + '%';
         $('half-status').textContent = r.done + ' of ' + r.total + ' dates · ' +
-          r.rows + ' rows · ' + r.columns + ' columns';
+          r.rows + ' rows · ' + r.columns + ' columns' +
+          (r.resumed ? ' (resumed)' : '');
         if (r.complete) break;
       }
       if (!r || !r.complete) {
-        toast('Still going — press Build again to continue where it stopped.', 'err');
+        toast('Still going — press Build again to carry on from here.', 'err');
         return;
       }
       $('half-link').href = r.url;
@@ -309,18 +312,16 @@
         (notes.length ? '. ' + notes.join('. ') + '.' : '.');
       // The reporting cut is a straight remap of what we just built, so run it
       // now rather than leaving the two files out of step.
-      var rep = null, guard2 = 0, repReset = true;
-      while (guard2++ < 40) {
+      var rep = null, guard2 = 0;
+      while (guard2++ < 80) {
         btn.textContent = 'Reporting… ' + (rep ? rep.rows + ' rows' : '');
         try {
-          rep = await window.QCApi.call('buildReporting',
-            { month: month, half: half, reset: repReset });
+          rep = await window.QCApi.call('buildReporting', { month: month, half: half });
         } catch (e) {
           toast('Combined sheet is ready, but the reporting file failed: ' + e.message, 'err');
           rep = null;
           break;
         }
-        repReset = false;
         if (rep.complete) break;
       }
       if (rep && rep.complete) {
