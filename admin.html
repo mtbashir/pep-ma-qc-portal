@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PEP MA QC — Admin</title>
-<link rel="stylesheet" href="css/styles.css?v=11">
+<link rel="stylesheet" href="css/styles.css?v=12">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚙</text></svg>">
 </head>
 <body>
@@ -101,8 +101,11 @@
         <b>QC RD YYYY-MM-H1</b> (1st&ndash;15th) or <b>-H2</b> (16th&ndash;end of month)
         file in the same folder. Columns follow the latest date in that half;
         anything an older day had that the latest no longer does is kept at the
-        far end, and every row carries a <b>QC Source Date</b>. Rebuilding
-        replaces the contents of the same file, so the link never changes.
+        far end, and every row carries a <b>QC Source Date</b>. Each date's QC
+        sheet is refreshed from its Kobo workbook first, so late uploads are
+        never left out. Rebuilding replaces the contents of the same file, so
+        the link never changes &mdash; but it takes several minutes, so leave
+        the tab open.
       </p>
       <div class="form-row" style="margin-bottom:12px">
         <label>Half-month <select id="half-pick"><option value="">Select&hellip;</option></select></label>
@@ -120,8 +123,8 @@
 </div>
 
 <!-- bump ?v= on every release so browsers never run a stale cached script -->
-<script src="js/config.js?v=11"></script>
-<script src="js/api.js?v=11"></script>
-<script src="js/admin.js?v=11"></script>
+<script src="js/config.js?v=12"></script>
+<script src="js/api.js?v=12"></script>
+<script src="js/admin.js?v=12"></script>
 </body>
 </html>

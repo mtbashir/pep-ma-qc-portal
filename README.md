@@ -159,6 +159,20 @@ added and removed mid-month — Aug 1 2026 had 401 Kobo columns, Aug 2 onwards h
 * Dates with no QC sheet yet (never opened in the portal) are **skipped**, and
   reported back so you know which ones to open and refresh first.
 
+### Refresh before combine
+
+`QC RD <date>` is a snapshot taken the first time that date is opened in the
+portal, so rows the field team uploads later that day are missing from it. A
+combine can only copy what the QC sheets hold, so the build runs `syncNewRows()`
+on each date first (`CONFIG.HALF_REFRESH`, on by default). That is append-only:
+existing rows and QC corrections are never touched.
+
+It roughly doubles build time — a Drive copy plus a full read of the Kobo
+workbook per date — so set `HALF_REFRESH: false` if you would rather refresh by
+hand with the portal's ↻ button. A date that cannot be refreshed (missing Kobo
+workbook, say) is still combined from whatever its QC sheet holds, and the
+failure is counted and named in the result rather than sinking the build.
+
 ### Running it
 
 Admin page → **Half-month combined sheet** → pick the half → **Build / rebuild**.
@@ -173,6 +187,14 @@ as many dates as fit in `CONFIG.HALF_BUDGET_MS` (4 minutes), records progress in
 Script Properties, and returns `done / total`. The admin page just keeps calling
 until it reports `complete`, and every call is guaranteed to advance by at least
 one date.
+
+Progress is saved after **every** date, and a date is marked pending before any
+of its rows are written. Appends are durable the moment they land, so an
+execution killed part way through a date would otherwise leave orphan rows that
+a retry would duplicate; on the next call the pending date's rows are deleted
+before it is redone. For the same reason a failed append does not silently retry
+through the other API — it gives up on the date and lets the retry path handle
+it cleanly.
 
 ### Nightly rebuild
 

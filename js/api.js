@@ -225,6 +225,7 @@
         return { month: p.month, half: p.half, name: 'QC RD ' + p.month + '-' + p.half, url: '#',
                  latest: p.month + '-15', total: 2, done: 2, remaining: 0, complete: true,
                  rows: DEMO_QUEUE.length, columns: 12, datesMissingQcSheet: [],
+                 rowsPulledIn: 0, refreshFailures: 0, refreshWarnings: [],
                  extraColumns: [], extraColumnCount: 0 };
       case 'exportQc': throw new Error('Export is not available in demo mode');
       default: throw new Error('Unknown demo action ' + action);

@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '3.8',
+  VERSION: '3.9',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -41,6 +41,11 @@ var CONFIG = {
   SOURCE_DATE_HEADER: 'QC Source Date',
   HALF_BUDGET_MS: 240000,
   HALF_APPEND_CELLS: 50000,
+  // Refresh each date's QC sheet from its Kobo workbook before combining it.
+  // QC sheets are snapshots taken when a date is first opened, so without this
+  // the half-month file inherits whatever rows were missing from them. Costs a
+  // Drive copy + full read per date, so it roughly doubles build time.
+  HALF_REFRESH: true,
 
   SESSION_HOURS: 12,
   DEFAULT_ADMIN: { username: 'admin', password: 'ChangeMe123!', displayName: 'Administrator' },
@@ -1737,6 +1742,10 @@ function hmStart(month, half) {
     dates: plan.dates.map(function (d) { return d.date; }),
     ids: ids,
     done: [], rows: 0,
+    pending: '',                 // date being appended right now, for crash recovery
+    refreshed: 0,                // rows syncNewRows() pulled into the QC sheets
+    refreshFailed: 0,
+    refreshWarnings: [],
     missing: plan.missing,
     cols: plan.headers.length,
     // kept for the report only; the sheet's own row 1 is the real header list
@@ -1758,7 +1767,16 @@ function hmAppendRows(st, rows, width) {
         Sheets.Spreadsheets.Values.append({ values: chunk }, st.ssId, quoteSheet(st.tab) + '!A1',
           { valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS' });
         wrote = true;
-      } catch (e) { sheetsFailed(e); }
+      } catch (e) {
+        // Deliberately NOT falling through to the other API here. A failed
+        // append may still have landed, and rewriting the chunk would duplicate
+        // rows. The date is marked pending, so give up on it now: the next call
+        // purges whatever it wrote and redoes it, by then already on the
+        // fallback because this marked the advanced service unusable.
+        sheetsFailed(e);
+        throw new Error('Append failed for ' + st.month + ' ' + st.half +
+          '; the date will be redone on the next pass. ' + ((e && e.message) || e));
+      }
     }
     if (!wrote) {
       var sh = openSs(st.ssId).getSheetByName(st.tab);
@@ -1819,12 +1837,89 @@ function hmAppendDate(st, date, headers, index) {
   return out.length;
 }
 
+/**
+ * Brings one date's QC sheet up to date with its Kobo workbook before it is
+ * combined. A QC sheet is a snapshot taken when the date was first opened, so
+ * rows the field team uploaded later that day are missing from it until this
+ * runs. Append-only: existing rows and QC corrections are never touched.
+ *
+ * A refresh failure must not sink the whole build - combine whatever the QC
+ * sheet already holds and report the failure instead of throwing.
+ */
+function hmRefreshDate(st, date) {
+  try {
+    var added = syncNewRows(date);
+    if (added) bumpDateGen(date);      // the portal's cached views of this date are now stale
+    return added;
+  } catch (e) {
+    var msg = date + ': ' + ((e && e.message) || e);
+    if (st.refreshWarnings.length < 10) st.refreshWarnings.push(msg);
+    st.refreshFailed++;
+    console.warn('half-month refresh failed for ' + msg);
+    return 0;
+  }
+}
+
+/**
+ * Removes any rows already written for one date.
+ *
+ * Appends are durable the moment they land, so an execution killed part way
+ * through a date leaves some of its rows behind while the date is still marked
+ * pending. Retrying without clearing them first would double them up. Rows for
+ * a date are always appended together, so they form one contiguous block.
+ */
+function hmPurgeDate(st, date, index) {
+  if (!hasOwn(index, CONFIG.SOURCE_DATE_HEADER)) return 0;
+  var props = hmSheetProps(st.ssId);
+  if (props.rows < 2) return 0;
+
+  var L = colLetter(index[CONFIG.SOURCE_DATE_HEADER] + 1);
+  var got = valuesBatchGet(st.ssId, [quoteSheet(st.tab) + '!' + L + '2:' + L + props.rows]);
+  var col = (got[0] && got[0].values) || [];
+
+  var first = -1, last = -1;
+  for (var i = 0; i < col.length; i++) {
+    var cell = col[i] && col[i][0];
+    var v = (cell === undefined || cell === null) ? '' : String(cell);
+    if (v === date) {
+      if (first === -1) first = i + 2;              // 1-based sheet row
+      last = i + 2;
+    }
+  }
+  if (first === -1) return 0;
+  var count = last - first + 1;
+
+  if (sheetsReady()) {
+    try {
+      Sheets.Spreadsheets.batchUpdate({ requests: [{
+        deleteDimension: {
+          range: { sheetId: props.sheetId, dimension: 'ROWS',
+                   startIndex: first - 1, endIndex: last }
+        }
+      }] }, st.ssId);
+      return count;
+    } catch (e) { sheetsFailed(e); }
+  }
+  openSs(st.ssId).getSheetByName(st.tab).deleteRows(first, count);
+  return count;
+}
+
 /** Processes pending dates until the time budget runs out. */
 function hmRunBudget(st, budgetMs) {
   var t0 = Date.now();
   var headers = hmHeaders(st.ssId, st.tab);
   var index = {};
   headers.forEach(function (h, i) { if (!hasOwn(index, h)) index[h] = i; });
+
+  // A previous call was killed part way through this date; drop the rows it
+  // managed to write before doing it again.
+  if (st.pending) {
+    // st.rows only ever counted dates that finished, so the rows being dropped
+    // here were never added to it — the count must not move.
+    hmPurgeDate(st, st.pending, index);
+    st.pending = '';
+    hmSetState(st);
+  }
 
   var doneSet = {};
   st.done.forEach(function (d) { doneSet[d] = true; });
@@ -1837,9 +1932,19 @@ function hmRunBudget(st, budgetMs) {
     var date = st.dates[i];
     if (hasOwn(doneSet, date)) continue;
     if (processed > 0 && Date.now() - t0 > budgetMs) break;
+
+    if (CONFIG.HALF_REFRESH) st.refreshed += hmRefreshDate(st, date);
+
+    // Claim the date before writing any of it, so an interrupted append is
+    // recognisable — and undoable — on the next call.
+    st.pending = date;
+    hmSetState(st);
+
     st.rows += hmAppendDate(st, date, headers, index);
     st.done.push(date);
     doneSet[date] = true;
+    st.pending = '';
+    hmSetState(st);          // per date, so a timeout cannot lose finished dates
     processed++;
   }
   return st;
@@ -1858,6 +1963,9 @@ function hmReport(st) {
     rows: st.rows,
     columns: st.cols,
     datesMissingQcSheet: st.missing,
+    rowsPulledIn: st.refreshed || 0,
+    refreshFailures: st.refreshFailed || 0,
+    refreshWarnings: st.refreshWarnings || [],
     extraColumns: st.extras,
     extraColumnCount: st.extrasCount
   };
@@ -1942,7 +2050,7 @@ function hmAutoStep() {
   if (!raw) return;
   var auto;
   try { auto = JSON.parse(raw); } catch (e) { PROPS.deleteProperty('HM_AUTO'); return; }
-  if (!auto.queue || !auto.queue.length || auto.tries > 24) {
+  if (!auto.queue || !auto.queue.length || auto.tries > 60) {
     PROPS.deleteProperty('HM_AUTO');
     return;
   }

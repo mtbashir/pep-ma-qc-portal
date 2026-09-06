@@ -274,7 +274,7 @@
     var reset = true, guard = 0, r = null;
     try {
       while (guard++ < 40) {
-        btn.textContent = 'Building… ' + (r ? r.done + '/' + r.total : '');
+        btn.textContent = 'Building… ' + (r ? r.done + '/' + r.total : '');   // slow: each date is refreshed first
         r = await window.QCApi.call('buildHalfMonth', { month: month, half: half, reset: reset });
         reset = false;
         $('half-bar').style.width = (r.total ? Math.round(100 * r.done / r.total) : 0) + '%';
@@ -289,6 +289,13 @@
       $('half-link').href = r.url;
       $('half-link').classList.remove('hidden');
       var notes = [];
+      if (r.rowsPulledIn) {
+        notes.push(r.rowsPulledIn + ' row(s) pulled into the QC sheets from Kobo first');
+      }
+      if (r.refreshFailures) {
+        notes.push(r.refreshFailures + ' date(s) could not be refreshed and were combined as-is: ' +
+                   (r.refreshWarnings || []).join('; '));
+      }
       if (r.extraColumnCount) {
         notes.push(r.extraColumnCount + ' column(s) kept from earlier days');
       }
