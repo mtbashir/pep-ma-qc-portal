@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '3.7',
+  VERSION: '3.8',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -1599,8 +1599,13 @@ function hmSheetProps(ssId) {
 
 /** Header row of a QC sheet, trailing blanks trimmed. */
 function hmHeaders(ssId, title) {
-  var t = title || hmSheetProps(ssId).title;
-  var h = firstLine(valuesBatchGet(ssId, [quoteSheet(t) + '!1:1'])[0]).map(String);
+  var props = hmSheetProps(ssId);
+  var t = title || props.title;
+  // An explicit A1 range, never a bare sheet name or a bare row: the Sheets REST
+  // API accepts those but SpreadsheetApp.getRange() does not, and valuesBatchGet()
+  // turns that failure into an empty result rather than an error.
+  var range = quoteSheet(t) + '!A1:' + colLetter(Math.max(1, props.cols)) + '1';
+  var h = firstLine(valuesBatchGet(ssId, [range])[0]).map(String);
   while (h.length && h[h.length - 1] === '') h.pop();
   return h;
 }
@@ -1702,7 +1707,10 @@ function hmPrepareTarget(month, half, plan) {
   var props = hmSheetProps(ssId);
   hmClearAll(ssId, props);
   hmEnsureGrid(ssId, props, plan.headers.length);
-  valuesBatchUpdate(ssId, [{ range: quoteSheet(props.title) + '!A1', values: [plan.headers] }]);
+  valuesBatchUpdate(ssId, [{
+    range: quoteSheet(props.title) + '!A1:' + colLetter(plan.headers.length) + '1',
+    values: [plan.headers]
+  }]);
   return { ssId: ssId, tab: props.title };
 }
 
@@ -1766,9 +1774,18 @@ function hmAppendRows(st, rows, width) {
 /** Reads one date's QC sheet and appends its rows, remapped by header name. */
 function hmAppendDate(st, date, headers, index) {
   var srcId = st.ids[date];
-  var srcTitle = hmSheetProps(srcId).title;
-  var got = valuesBatchGet(srcId, [quoteSheet(srcTitle)]);
+  var srcProps = hmSheetProps(srcId);
+  var srcTitle = srcProps.title;
+  var range = quoteSheet(srcTitle) + '!A1:' +
+              colLetter(Math.max(1, srcProps.cols)) + Math.max(1, srcProps.rows);
+  var got = valuesBatchGet(srcId, [range]);
   var rows = (got[0] && got[0].values) || [];
+  // Not even a header row back means the read failed, not that the day is empty.
+  // Silently recording 0 rows here is how a whole half-month ends up blank.
+  if (!rows.length) {
+    throw new Error('Could not read the QC sheet for ' + date + ' (tab "' + srcTitle +
+      '"). Nothing was returned for ' + range + '.');
+  }
   if (rows.length < 2) return 0;
 
   var srcHeaders = rows[0].map(String);
