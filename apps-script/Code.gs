@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '4.3',
+  VERSION: '4.4',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -56,6 +56,14 @@ var CONFIG = {
   REPORT_SHEET_PREFIX: 'REPORTING ',
   REPORT_CHUNK_CELLS: 90000,
   REPORT_STRICT: true,        // stop rather than emit a report built on a shifted layout
+
+  // Reporting columns O..DX (1-based 15..128, 114 columns) read 0 rather than
+  // blank, so the measure block aggregates without empty cells: cooler
+  // availability, counts, types, placement, shelves, facings and MSL
+  // compliance. Everything outside the range — store identifiers, photo links,
+  // GPS, QC columns, dates — keeps a genuine blank.
+  REPORT_ZERO_FROM: 15,
+  REPORT_ZERO_TO: 128,
   HALF_RESUME_MAX_MS: 21600000,   // 6 h; older unfinished builds start over
 
   SESSION_HOURS: 12,
@@ -2354,6 +2362,11 @@ function rpStart(month, half) {
  * Copies one chunk of source rows across, remapped into reporting order.
  * Returns how many source rows were consumed.
  */
+/** Is this 1-based reporting column one of the measure columns (O..DX)? */
+function reportZeroFilled(n) {
+  return n >= CONFIG.REPORT_ZERO_FROM && n <= CONFIG.REPORT_ZERO_TO;
+}
+
 function rpCopyChunk(st, dateCol) {
   var perChunk = Math.max(1, Math.floor(CONFIG.REPORT_CHUNK_CELLS / Math.max(1, st.srcCols)));
   var last = Math.min(st.nextRow + perChunk - 1, st.srcRows);
@@ -2377,7 +2390,11 @@ function rpCopyChunk(st, dateCol) {
     for (var i = 0; i < REPORT_MAP.length; i++) {
       var col = REPORT_MAP[i][1];
       var v = col ? src[col - 1] : '';
-      line[i] = (v === undefined || v === null) ? '' : v;
+      if (v === undefined || v === null) v = '';
+      // A blank in the measure block means "nothing there", which has to read
+      // as 0 to be summable. Outside that range a blank stays blank.
+      if (v === '' && reportZeroFilled(i + 1)) v = 0;
+      line[i] = v;
     }
     out.push(line);
   }

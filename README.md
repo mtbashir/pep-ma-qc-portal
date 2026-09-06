@@ -173,6 +173,22 @@ hand with the portal's ↻ button. A date that cannot be refreshed (missing Kobo
 workbook, say) is still combined from whatever its QC sheet holds, and the
 failure is counted and named in the result rather than sinking the build.
 
+### Blank measures read as 0
+
+Reporting columns **O..DX** (1-based 15–128, 114 columns) get `0` where the
+source is blank, so the measure block sums without holes. That range is the
+cooler and shelf block: availability, cooler counts, types, placement, shelves,
+facings, and MSL compliance. Set by `CONFIG.REPORT_ZERO_FROM` / `REPORT_ZERO_TO`.
+
+Everything outside it keeps a genuine blank — store identifiers, photo links,
+GPS (0,0 is a real coordinate), the QC columns and dates.
+
+Three columns in the range have no source at all and so are now always `0`:
+`PEP/KO/OTH COOLER - TYPE VISI & CHEST COOLER` (#19, #52, #83). Four more hold
+text rather than numbers, so a blank there becomes `0` alongside Yes/No values:
+the three `SWITCHED ON` columns (#28, #59, #90) and `4.4.1: MSL Compliance(GT)`
+(#125).
+
 ### Running it
 
 Admin page → **Half-month combined sheet** → pick the half → **Build / rebuild**.
