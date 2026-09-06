@@ -183,7 +183,12 @@ header row: `Values.clear()` empties the cells but leaves the rows in place, and
 appends insert fresh ones rather than reusing them, so without the resize every
 rebuild stacked another ~4,500 blank rows on the last. At 449 columns that
 reaches Sheets' 10,000,000 cell ceiling in about five rebuilds, after which every
-append fails with "would increase the number of cells above the limit". Because the file is emptied at the start of a
+append fails with "would increase the number of cells above the limit".
+
+That resize only happens when a build starts fresh, so a build that **resumes**
+would inherit the bloat and fail on the same append forever. Every pass
+therefore also trims the grid back to the rows actually in use — a no-op on a
+fresh build, and the thing that lets an already-bloated sheet recover. Because the file is emptied at the start of a
 rebuild, it is briefly incomplete while one is running.
 
 A half-month is roughly 4,500 rows × 450 columns — far more than one Apps Script

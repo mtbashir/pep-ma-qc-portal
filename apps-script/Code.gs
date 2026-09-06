@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '4.2',
+  VERSION: '4.3',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -1929,6 +1929,38 @@ function hmPurgeDate(st, date, index) {
   return count;
 }
 
+/**
+ * Drops blank rows past the end of the data.
+ *
+ * hmResetGrid() only runs when a build starts fresh, so a build that RESUMES
+ * inherits whatever the grid had grown to — including the blank tail left by
+ * earlier rebuilds. Without this, a workbook already near the 10,000,000 cell
+ * ceiling can never recover: every resumed attempt fails on the same append.
+ *
+ * How many rows are really in use is known from the state, so this costs one
+ * metadata read and, only when there is slack to reclaim, one resize.
+ */
+function hmTrimGrid(ssId, tab, keepRows) {
+  var props = hmSheetProps(ssId);
+  if (props.title !== tab) return;
+  var want = Math.max(2, keepRows);
+  if (props.rows <= want) return;
+
+  if (sheetsReady()) {
+    try {
+      Sheets.Spreadsheets.batchUpdate({ requests: [{
+        updateSheetProperties: {
+          properties: { sheetId: props.sheetId, gridProperties: { rowCount: want } },
+          fields: 'gridProperties.rowCount'
+        }
+      }] }, ssId);
+      return;
+    } catch (e) { sheetsFailed(e); }
+  }
+  var sh = openSs(ssId).getSheetByName(tab);
+  if (sh.getMaxRows() > want) sh.deleteRows(want + 1, sh.getMaxRows() - want);
+}
+
 /** Processes pending dates until the time budget runs out. */
 function hmRunBudget(st, budgetMs) {
   var t0 = Date.now();
@@ -1945,6 +1977,11 @@ function hmRunBudget(st, budgetMs) {
     st.pending = '';
     hmSetState(st);
   }
+
+  // Reclaim anything past the rows actually in use. On a fresh build the grid
+  // was just reset, so this is a no-op; on a resumed one it is what stops an
+  // already-bloated sheet from failing every append forever.
+  hmTrimGrid(st.ssId, st.tab, st.rows + 2);
 
   var doneSet = {};
   st.done.forEach(function (d) { doneSet[d] = true; });
@@ -2360,6 +2397,8 @@ function rpRunBudget(st, budgetMs) {
   var t0 = Date.now();
   var srcHeaders = hmHeaders(st.srcId, st.srcTab);
   var dateCol = srcHeaders.indexOf(CONFIG.SOURCE_DATE_HEADER) + 1;   // 0 if absent
+
+  hmTrimGrid(st.ssId, st.tab, st.rows + 2);
 
   var did = 0, lastMs = 0;
   while (st.nextRow <= st.srcRows) {
