@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '4.1',
+  VERSION: '4.2',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -1677,23 +1677,36 @@ function hmClearAll(ssId, props) {
   openSs(ssId).getSheetByName(props.title).clearContents();
 }
 
-function hmEnsureGrid(ssId, props, cols) {
-  if (props.cols >= cols) return;
+
+/**
+ * Shrinks a rebuild target back to a header-sized grid.
+ *
+ * Values.clear() empties the cells but leaves the rows in place, and appends
+ * INSERT_ROWS fresh ones rather than reusing them — so each rebuild stacked
+ * another few thousand blank rows on top of the last until the workbook hit
+ * Sheets' 10,000,000 cell ceiling and every append failed. Resizing the grid
+ * is what actually reclaims them.
+ */
+function hmResetGrid(ssId, props, cols) {
   if (sheetsReady()) {
     try {
       Sheets.Spreadsheets.batchUpdate({ requests: [{
         updateSheetProperties: {
-          properties: { sheetId: props.sheetId, gridProperties: { columnCount: cols } },
-          fields: 'gridProperties.columnCount'
+          properties: { sheetId: props.sheetId,
+                        gridProperties: { rowCount: 2, columnCount: cols } },
+          fields: 'gridProperties.rowCount,gridProperties.columnCount'
         }
       }] }, ssId);
-      props.cols = cols;
+      props.rows = 2; props.cols = cols;
       return;
     } catch (e) { sheetsFailed(e); }
   }
   var sh = openSs(ssId).getSheetByName(props.title);
-  sh.insertColumnsAfter(sh.getMaxColumns(), cols - sh.getMaxColumns());
-  props.cols = cols;
+  if (sh.getMaxRows() > 2) sh.deleteRows(3, sh.getMaxRows() - 2);
+  if (sh.getMaxColumns() > cols) sh.deleteColumns(cols + 1, sh.getMaxColumns() - cols);
+  else if (sh.getMaxColumns() < cols) sh.insertColumnsAfter(sh.getMaxColumns(), cols - sh.getMaxColumns());
+  props.rows = sh.getMaxRows();
+  props.cols = sh.getMaxColumns();
 }
 
 /**
@@ -1723,7 +1736,7 @@ function hmPrepareTarget(month, half, plan) {
 
   var props = hmSheetProps(ssId);
   hmClearAll(ssId, props);
-  hmEnsureGrid(ssId, props, plan.headers.length);
+  hmResetGrid(ssId, props, plan.headers.length);
   valuesBatchUpdate(ssId, [{
     range: quoteSheet(props.title) + '!A1:' + colLetter(plan.headers.length) + '1',
     values: [plan.headers]
@@ -2281,7 +2294,7 @@ function rpStart(month, half) {
 
   var props = hmSheetProps(ssId);
   hmClearAll(ssId, props);
-  hmEnsureGrid(ssId, props, headers.length);
+  hmResetGrid(ssId, props, headers.length);
   valuesBatchUpdate(ssId, [{
     range: quoteSheet(props.title) + '!A1:' + colLetter(headers.length) + '1',
     values: [headers]

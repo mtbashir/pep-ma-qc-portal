@@ -178,7 +178,12 @@ failure is counted and named in the result rather than sinking the build.
 Admin page → **Half-month combined sheet** → pick the half → **Build / rebuild**.
 
 A rebuild **reuses the same file**, wiping and refilling it, so a link you have
-shared or bookmarked keeps working. Because the file is emptied at the start of a
+shared or bookmarked keeps working. Wiping resizes the grid back to a single
+header row: `Values.clear()` empties the cells but leaves the rows in place, and
+appends insert fresh ones rather than reusing them, so without the resize every
+rebuild stacked another ~4,500 blank rows on the last. At 449 columns that
+reaches Sheets' 10,000,000 cell ceiling in about five rebuilds, after which every
+append fails with "would increase the number of cells above the limit". Because the file is emptied at the start of a
 rebuild, it is briefly incomplete while one is running.
 
 A half-month is roughly 4,500 rows × 450 columns — far more than one Apps Script
