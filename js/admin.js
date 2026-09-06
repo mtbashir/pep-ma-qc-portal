@@ -270,6 +270,7 @@
     $('half-track').classList.remove('hidden');
     $('half-status').classList.remove('hidden');
     $('half-bar').style.width = '0%';
+    $('report-link').classList.add('hidden');
 
     var reset = true, guard = 0, r = null;
     try {
@@ -306,7 +307,32 @@
       $('half-status').textContent = r.name + ' — ' + r.rows + ' rows × ' + r.columns +
         ' columns from ' + r.done + ' date(s), layout from ' + r.latest +
         (notes.length ? '. ' + notes.join('. ') + '.' : '.');
-      toast('Combined sheet ready ✔', 'ok');
+      // The reporting cut is a straight remap of what we just built, so run it
+      // now rather than leaving the two files out of step.
+      var rep = null, guard2 = 0, repReset = true;
+      while (guard2++ < 40) {
+        btn.textContent = 'Reporting… ' + (rep ? rep.rows + ' rows' : '');
+        try {
+          rep = await window.QCApi.call('buildReporting',
+            { month: month, half: half, reset: repReset });
+        } catch (e) {
+          toast('Combined sheet is ready, but the reporting file failed: ' + e.message, 'err');
+          rep = null;
+          break;
+        }
+        repReset = false;
+        if (rep.complete) break;
+      }
+      if (rep && rep.complete) {
+        $('report-link').href = rep.url;
+        $('report-link').classList.remove('hidden');
+        $('half-status').textContent += '  ·  ' + rep.name + ': ' +
+          rep.rows + ' rows × ' + rep.columns + ' columns' +
+          (rep.warnings && rep.warnings.length ? ' (' + rep.warnings.length + ' mapping warning(s))' : '');
+        toast('Combined + reporting sheets ready ✔', 'ok');
+      } else if (rep) {
+        toast('Reporting file is still building — press Build again to finish it.', 'err');
+      }
       loadHalves();
     } catch (e) {
       if (e.staleSession) return;

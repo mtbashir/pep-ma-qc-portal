@@ -220,6 +220,11 @@
           { folderType: 'STORES PHOTOS', images: 399, matched: 399, done: 0, flagged: 0, pending: 399 },
           { folderType: 'MT SHELVES', images: 8, matched: 8, done: 8, flagged: 0, pending: 0 }
         ] };
+      case 'buildReporting':
+        return { month: p.month, half: p.half, name: 'REPORTING ' + p.month + '-' + p.half,
+                 url: '#', source: 'QC RD ' + p.month + '-' + p.half,
+                 rows: DEMO_QUEUE.length, columns: 402, sourceRows: DEMO_QUEUE.length,
+                 complete: true, warnings: [] };
       case 'listHalfMonths': return [{ month: '2026-07', half: 'H1', built: false, url: '' }];
       case 'buildHalfMonth':
         return { month: p.month, half: p.half, name: 'QC RD ' + p.month + '-' + p.half, url: '#',

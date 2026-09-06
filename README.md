@@ -207,6 +207,58 @@ Just after a half turns over, the one that closed is usually still being QC'd, s
 on days 1–5 the previous month's H2 is refreshed too, and on days 16–20 the same
 month's H1 is. Older halves are rebuilt on demand with the admin button.
 
+## Reporting format
+
+Alongside each half-month file the portal produces a reporting cut of it:
+
+| File | Is |
+|------|----|
+| `QC RD 2026-08-H1` | 449 columns — the raw QC data, layout follows the latest date |
+| `REPORTING 2026-08-H1` | **402 columns**, in reporting order, ready to drop into the pack |
+
+The column map lives in **`apps-script/ReportMap.gs`**, generated from
+`KOBO RAW DATA/QC RD To Reporting Format.xlsx` (Sheet3). One entry per reporting
+column:
+
+```js
+[ 'CITY NAME', 14, 'Select City Name' ]     // title, source column, expected source title
+```
+
+A source column of `0` means the reporting column has no source and is emitted
+blank — there are 4 of those. Built **only from the half-month sheet**, never
+from the daily QC sheets.
+
+### The map is positional, so it is checked
+
+Reporting column N takes source column C by *number*. If a Kobo question is
+added or removed, every column after it shifts and the whole report would be
+quietly wrong. So before a single row is copied, the live header is compared
+against the expected title of all 398 mapped columns; a mismatch aborts the
+build and names the offending columns. Set `CONFIG.REPORT_STRICT = false` to
+build anyway, but the right fix is to regenerate `ReportMap.gs`.
+
+### Four corrections to the source map
+
+Sheet3 assumed the PEP option order (Backend Inside, then Outside) held for the
+KO and OTHERS blocks as well, but those forms list Outside first, so four
+columns were crossed. `ReportMap.gs` corrects them to match the reporting column
+names — PEP's own entries were already right:
+
+| Reporting column | Sheet3 said | Corrected to |
+|---|---|---|
+| KO COOLER PLACEMENT - AT BACK/IN | 88 | **89** |
+| KO COOLER PLACEMENT - AT BACK/OUT | 89 | **88** |
+| OTH COOLER PLACEMENT - AT BACK/IN | 130 | **131** |
+| OTH COOLER PLACEMENT - AT BACK/OUT | 131 | **130** |
+
+### Running it
+
+The admin **Build / rebuild** button runs it automatically once the half-month
+file finishes, and the nightly job does the same. Like the combine it is
+resumable, working through the source in row chunks
+(`CONFIG.REPORT_CHUNK_CELLS`). Rebuilding reuses the same file, so shared links
+keep working.
+
 ## Performance notes
 
 The backend is tuned for a ~400-row × ~400-column Kobo sheet and ~900 photos
@@ -251,6 +303,7 @@ js/app.js           QC portal logic
 js/admin.js         Admin logic
 apps-script/
   Code.gs           Backend API — paste into script.google.com
+  ReportMap.gs      QC RD -> reporting column map (402 entries)
   appsscript.json   Apps Script manifest (Drive advanced service, scopes)
 ```
 

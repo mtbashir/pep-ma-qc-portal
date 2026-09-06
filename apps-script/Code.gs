@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '3.9',
+  VERSION: '4.0',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -46,6 +46,12 @@ var CONFIG = {
   // the half-month file inherits whatever rows were missing from them. Costs a
   // Drive copy + full read per date, so it roughly doubles build time.
   HALF_REFRESH: true,
+
+  // Reporting format: the half-month sheet rewritten into the 402 columns the
+  // reporting pack expects (column map in ReportMap.gs).
+  REPORT_SHEET_PREFIX: 'REPORTING ',
+  REPORT_CHUNK_CELLS: 90000,
+  REPORT_STRICT: true,        // stop rather than emit a report built on a shifted layout
 
   SESSION_HOURS: 12,
   DEFAULT_ADMIN: { username: 'admin', password: 'ChangeMe123!', displayName: 'Administrator' },
@@ -312,6 +318,7 @@ function route(p) {
     case 'listSessions': return listSessions();
     case 'listHalfMonths': return listHalfMonths();
     case 'buildHalfMonth': return buildHalfMonth(p);
+    case 'buildReporting': return buildReporting(p);
   }
   throw new Error('Unknown action: ' + action);
 }
@@ -2036,7 +2043,7 @@ function nightlyRebuildHalfMonth() {
     queue.push({ month: month, half: 'H1' });
   }
 
-  PROPS.setProperty('HM_AUTO', JSON.stringify({ queue: queue, tries: 0, fresh: true }));
+  PROPS.setProperty('HM_AUTO', JSON.stringify({ queue: queue, tries: 0, fresh: true, rpFresh: true }));
   hmAutoStep();
 }
 
@@ -2069,7 +2076,23 @@ function hmAutoStep() {
     st = hmRunBudget(st, CONFIG.HALF_BUDGET_MS);
     hmSetState(st);
     auto.fresh = false;
-    if (st.done.length >= st.dates.length) { auto.queue.shift(); auto.fresh = true; }
+    if (st.done.length >= st.dates.length) {
+      // The half-month file is finished, so refresh the reporting cut of it
+      // before moving on. Budgeted the same way; a failure here must not cost
+      // us the combine that just succeeded.
+      try {
+        var rst = auto.rpFresh === false ? rpGetState(job.month, job.half) : null;
+        if (!rst) rst = rpStart(job.month, job.half);
+        rst = rpRunBudget(rst, CONFIG.HALF_BUDGET_MS);
+        rpSetState(rst);
+        auto.rpFresh = false;
+        if (rst.nextRow > rst.srcRows) { auto.queue.shift(); auto.fresh = true; auto.rpFresh = true; }
+      } catch (e) {
+        console.warn('reporting build for ' + job.month + ' ' + job.half +
+                     ' skipped: ' + ((e && e.message) || e));
+        auto.queue.shift(); auto.fresh = true; auto.rpFresh = true;
+      }
+    }
   } catch (e) {
     // A half with no QC sheets yet lands here; drop it and move on.
     console.warn('nightly rebuild of ' + job.month + ' ' + job.half + ' skipped: ' + (e && e.message));
@@ -2113,6 +2136,226 @@ function installHalfMonthTrigger() {
   return msg;
 }
 
+
+/* ------------------------------------------------------------------ *
+ *  Reporting format  ("REPORTING <YYYY-MM>-H1" / "-H2")
+ *
+ *  Rewrites a half-month sheet into the 402 columns the reporting pack
+ *  expects, in its order. The map lives in ReportMap.gs.
+ *
+ *  Built from the HALF-MONTH sheet, never from the daily QC sheets, so
+ *  whatever the half-month file contains is exactly what gets reported.
+ *
+ *  The map is POSITIONAL — reporting column N takes source column C. If a
+ *  Kobo question is added or removed, every column after it shifts and the
+ *  whole report would be quietly wrong, so the live header is checked
+ *  against the expected title of every mapped column before a single row is
+ *  copied. A mismatch stops the build and names the columns.
+ *
+ *  Like the half-month build this is resumable, working through the source
+ *  in row chunks so it stays inside one execution.
+ * ------------------------------------------------------------------ */
+
+function reportName(month, half) {
+  return CONFIG.REPORT_SHEET_PREFIX + month + '-' + half;
+}
+
+/** Reporting column titles, in order. */
+function reportHeaders() {
+  return REPORT_MAP.map(function (m) { return m[0]; });
+}
+
+/**
+ * Confirms the half-month sheet still looks the way the map was built for.
+ * Returns a list of human-readable problems; empty means it is safe to copy.
+ */
+function reportCheckHeader(srcHeaders) {
+  var problems = [];
+  for (var i = 0; i < REPORT_MAP.length; i++) {
+    var col = REPORT_MAP[i][1];
+    if (!col) continue;                                  // deliberately blank
+    if (col > srcHeaders.length) {
+      problems.push('reporting column ' + (i + 1) + ' "' + REPORT_MAP[i][0] +
+        '" needs source column ' + col + ' but the sheet only has ' + srcHeaders.length);
+      continue;
+    }
+    var want = String(REPORT_MAP[i][2] || '');
+    var got = String(srcHeaders[col - 1] || '');
+    if (want && want !== got) {
+      problems.push('source column ' + col + ' should be "' + want + '" but is "' + got + '"');
+    }
+  }
+  return problems;
+}
+
+function rpStateKey(month, half) { return 'RP|' + month + '|' + half; }
+
+function rpGetState(month, half) {
+  var raw = PROPS.getProperty(rpStateKey(month, half));
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
+
+function rpSetState(st) { PROPS.setProperty(rpStateKey(st.month, st.half), JSON.stringify(st)); }
+
+/** Creates (or empties) the reporting file and writes its header row. */
+function rpStart(month, half) {
+  var folderId = outputFolder().getId();
+  var srcName = halfMonthName(month, half);
+  var files = driveList(folderId);
+
+  var src = files.filter(function (f) {
+    return f.name.trim() === srcName && f.mimeType === 'application/vnd.google-apps.spreadsheet';
+  })[0];
+  if (!src) {
+    throw new Error('No "' + srcName + '" sheet yet — build the half-month file first.');
+  }
+
+  var srcProps = hmSheetProps(src.id);
+  var srcHeaders = hmHeaders(src.id, srcProps.title);
+
+  var problems = reportCheckHeader(srcHeaders);
+  if (problems.length && CONFIG.REPORT_STRICT) {
+    throw new Error('"' + srcName + '" no longer matches the reporting map, so the report ' +
+      'would be wrong. ' + problems.length + ' problem(s): ' + problems.slice(0, 5).join('; ') +
+      (problems.length > 5 ? ' …' : '') +
+      '  Regenerate ReportMap.gs, or set CONFIG.REPORT_STRICT = false to build anyway.');
+  }
+
+  var headers = reportHeaders();
+  var name = reportName(month, half);
+  var existing = files.filter(function (f) {
+    return f.name.trim() === name && f.mimeType === 'application/vnd.google-apps.spreadsheet';
+  })[0];
+
+  var ssId;
+  if (existing) {
+    ssId = existing.id;                       // reuse, so shared links keep working
+  } else {
+    ssId = Drive.Files.create({
+      name: name,
+      mimeType: 'application/vnd.google-apps.spreadsheet',
+      parents: [folderId]
+    }, null, { supportsAllDrives: true }).id;
+  }
+
+  var props = hmSheetProps(ssId);
+  hmClearAll(ssId, props);
+  hmEnsureGrid(ssId, props, headers.length);
+  valuesBatchUpdate(ssId, [{
+    range: quoteSheet(props.title) + '!A1:' + colLetter(headers.length) + '1',
+    values: [headers]
+  }]);
+
+  return {
+    month: month, half: half,
+    ssId: ssId, tab: props.title,
+    srcId: src.id, srcTab: srcProps.title,
+    srcRows: srcProps.rows, srcCols: srcProps.cols,
+    nextRow: 2,                    // next source row to read (row 1 is the header)
+    rows: 0,
+    cols: headers.length,
+    warnings: problems.slice(0, 10),
+    startedAt: new Date().toISOString()
+  };
+}
+
+/**
+ * Copies one chunk of source rows across, remapped into reporting order.
+ * Returns how many source rows were consumed.
+ */
+function rpCopyChunk(st, dateCol) {
+  var perChunk = Math.max(1, Math.floor(CONFIG.REPORT_CHUNK_CELLS / Math.max(1, st.srcCols)));
+  var last = Math.min(st.nextRow + perChunk - 1, st.srcRows);
+  if (last < st.nextRow) return 0;
+
+  var range = quoteSheet(st.srcTab) + '!A' + st.nextRow + ':' +
+              colLetter(st.srcCols) + last;
+  var got = valuesBatchGet(st.srcId, [range]);
+  var rows = (got[0] && got[0].values) || [];
+
+  var out = [];
+  for (var r = 0; r < rows.length; r++) {
+    var src = rows[r];
+    // The grid is usually taller than the data; every real row carries a
+    // source date, so use it to spot the blank tail.
+    if (dateCol > 0) {
+      var d = src[dateCol - 1];
+      if (d === undefined || d === null || String(d).trim() === '') continue;
+    }
+    var line = new Array(REPORT_MAP.length);
+    for (var i = 0; i < REPORT_MAP.length; i++) {
+      var col = REPORT_MAP[i][1];
+      var v = col ? src[col - 1] : '';
+      line[i] = (v === undefined || v === null) ? '' : v;
+    }
+    out.push(line);
+  }
+
+  if (out.length) {
+    hmAppendRows({ ssId: st.ssId, tab: st.tab, month: st.month, half: st.half },
+                 out, REPORT_MAP.length);
+    st.rows += out.length;
+  }
+  var consumed = last - st.nextRow + 1;
+  st.nextRow = last + 1;
+  return consumed;
+}
+
+/** Works through the source until the time budget runs out. */
+function rpRunBudget(st, budgetMs) {
+  var t0 = Date.now();
+  var srcHeaders = hmHeaders(st.srcId, st.srcTab);
+  var dateCol = srcHeaders.indexOf(CONFIG.SOURCE_DATE_HEADER) + 1;   // 0 if absent
+
+  var did = 0;
+  while (st.nextRow <= st.srcRows) {
+    if (did > 0 && Date.now() - t0 > budgetMs) break;
+    if (!rpCopyChunk(st, dateCol)) break;
+    did++;
+    rpSetState(st);            // per chunk, so a timeout cannot lose the work
+  }
+  return st;
+}
+
+function rpReport(st) {
+  return {
+    month: st.month, half: st.half,
+    name: reportName(st.month, st.half),
+    url: 'https://docs.google.com/spreadsheets/d/' + st.ssId + '/edit',
+    source: halfMonthName(st.month, st.half),
+    rows: st.rows,
+    columns: st.cols,
+    sourceRows: Math.max(0, st.srcRows - 1),
+    complete: st.nextRow > st.srcRows,
+    warnings: st.warnings || []
+  };
+}
+
+/**
+ * Build (or continue building) one half-month's reporting file.
+ *   p = { month: 'YYYY-MM', half: 'H1'|'H2', reset: true on the first call }
+ * Keep calling with reset:false until data.complete.
+ */
+function buildReporting(p) {
+  var month = String(p.month || '').trim();
+  var half = String(p.half || '').trim().toUpperCase();
+  halfMonthDates(month, half);                     // validates both
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    throw new Error('Another build is running — wait for it to finish, then try again.');
+  }
+  try {
+    var st = p.reset ? null : rpGetState(month, half);
+    if (!st) st = rpStart(month, half);
+    st = rpRunBudget(st, CONFIG.HALF_BUDGET_MS);
+    rpSetState(st);
+    return { ok: true, data: rpReport(st) };
+  } finally {
+    lock.releaseLock();
+  }
+}
 
 /* ------------------------------------------------------------------ *
  *  Utils
