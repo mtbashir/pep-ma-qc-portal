@@ -22,6 +22,12 @@
  * were crossed. Corrected here to match the reporting column names:
  *     #55 KO  AT BACK/IN  88 -> 89      #56 KO  AT BACK/OUT  89 -> 88
  *     #88 OTH AT BACK/IN 130 -> 131     #89 OTH AT BACK/OUT 131 -> 130
+ *
+ * The five "GD LINK TO ... PIC" columns also differ. Sheet3 pointed them at the
+ * photo question itself, which holds the file NAME; the link reporting wants is
+ * in the sibling "_URL" column one to the right:
+ *     #10 STORE  25 -> 26     #11 PEP  34 -> 35     #12 KO  76 -> 77
+ *     #13 OTHER 118 -> 119    #14 MT  174 -> 175
  */
 
 var REPORT_MAP = [
@@ -34,11 +40,11 @@ var REPORT_MAP = [
   ['CHANNEL', 19, 'Select Channel Type'],
   ['LAT', 21, '_1.7: GPS Coordinates_latitude'],
   ['LONG', 22, '_1.7: GPS Coordinates_longitude'],
-  ['GD LINK TO STORE PIC', 25, '1.8: Shop Front Photo'],
-  ['GD LINK TO PEP COOLER PIC', 34, '2.1.2: Cooler Photo — full front view showing all stock facings'],
-  ['GD LINK TO KO COOLER PIC', 76, '2.2.2: Cooler Photo — full front view showing all stock facings'],
-  ['GD LINK TO OTHER COOLER PIC', 118, '2.3.2: Cooler Photo1 — full front view showing all stock facings'],
-  ['GD LINK TO MT COOLER PIC', 174, '3.1.16: Warm Stock — full front view showing all stock facings'],
+  ['GD LINK TO STORE PIC', 26, '1.8: Shop Front Photo_URL'],
+  ['GD LINK TO PEP COOLER PIC', 35, '2.1.2: Cooler Photo — full front view showing all stock facings_URL'],
+  ['GD LINK TO KO COOLER PIC', 77, '2.2.2: Cooler Photo — full front view showing all stock facings_URL'],
+  ['GD LINK TO OTHER COOLER PIC', 119, '2.3.2: Cooler Photo1 — full front view showing all stock facings_URL'],
+  ['GD LINK TO MT COOLER PIC', 175, '3.1.16: Warm Stock — full front view showing all stock facings_URL'],
   ['PEP COOLER -AVAILABLE', 30, 'Q2:  Cooler Availability & Status/PEPSI Coolers'],
   ['PEP COOLER - TOT COOLERS', 33, '2.1.1: How many PEP coolers are in the store?'],
   ['PEP COOLER - TYPE VISI COOLER', 41, '2.1.5: Cooler Type/Visi Cooler'],
