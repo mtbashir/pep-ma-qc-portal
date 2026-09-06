@@ -428,3 +428,20 @@ var REPORT_MAP = [
   ['QC STORES PHOTOS - Remarks', 448, 'QC STORES PHOTOS - Remarks'],
   ['QC Source Date', 449, 'QC Source Date'],
 ];
+
+/**
+ * Reporting columns that are computed from other source columns rather than
+ * copied from one.
+ *
+ * "TYPE VISI & CHEST COOLER" means the store has both types: 1 only when the
+ * Visi and Chest option columns are both set, otherwise 0. Sheet3 left these
+ * three without a source, which would have made them blank (and, being inside
+ * the zero-filled O..DX range, silently 0 on every row).
+ *
+ *     <1-based reporting column> : { and: [ <source col>, <source col> ] }
+ */
+var REPORT_DERIVED = {
+  19: { and: [41, 42] },     // PEP  2.1.5 Visi + Chest
+  52: { and: [83, 84] },     // KO   2.2.5 Visi + Chest
+  83: { and: [125, 126] }    // OTH  2.3.5 Visi + Chest
+};

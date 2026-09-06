@@ -183,11 +183,14 @@ facings, and MSL compliance. Set by `CONFIG.REPORT_ZERO_FROM` / `REPORT_ZERO_TO`
 Everything outside it keeps a genuine blank — store identifiers, photo links,
 GPS (0,0 is a real coordinate), the QC columns and dates.
 
-Three columns in the range have no source at all and so are now always `0`:
-`PEP/KO/OTH COOLER - TYPE VISI & CHEST COOLER` (#19, #52, #83). Four more hold
-text rather than numbers, so a blank there becomes `0` alongside Yes/No values:
-the three `SWITCHED ON` columns (#28, #59, #90) and `4.4.1: MSL Compliance(GT)`
-(#125).
+`PEP/KO/OTH COOLER - TYPE VISI & CHEST COOLER` (#19, #52, #83) have no source
+column in Sheet3 because they are **derived**: 1 only when that block's Visi and
+Chest option columns are both set, otherwise 0. `REPORT_DERIVED` in
+`ReportMap.gs` holds those rules.
+
+Four columns in the range hold text rather than numbers, so a blank there
+becomes `0` alongside Yes/No values: the three `SWITCHED ON` columns (#28, #59,
+#90) and `4.4.1: MSL Compliance(GT)` (#125).
 
 ### Running it
 

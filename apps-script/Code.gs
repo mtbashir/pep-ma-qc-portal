@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '4.4',
+  VERSION: '4.5',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -2362,6 +2362,19 @@ function rpStart(month, half) {
  * Copies one chunk of source rows across, remapped into reporting order.
  * Returns how many source rows were consumed.
  */
+/** 1 when every named source column is truthy, else 0. */
+function reportDerivedValue(rule, src) {
+  var cols = rule && rule.and;
+  if (!cols || !cols.length) return 0;
+  for (var i = 0; i < cols.length; i++) {
+    var v = src[cols[i] - 1];
+    if (v === undefined || v === null) return 0;
+    var t = String(v).trim();
+    if (t === '' || t === '0' || t.toLowerCase() === 'no' || t.toLowerCase() === 'false') return 0;
+  }
+  return 1;
+}
+
 /** Is this 1-based reporting column one of the measure columns (O..DX)? */
 function reportZeroFilled(n) {
   return n >= CONFIG.REPORT_ZERO_FROM && n <= CONFIG.REPORT_ZERO_TO;
@@ -2389,7 +2402,8 @@ function rpCopyChunk(st, dateCol) {
     var line = new Array(REPORT_MAP.length);
     for (var i = 0; i < REPORT_MAP.length; i++) {
       var col = REPORT_MAP[i][1];
-      var v = col ? src[col - 1] : '';
+      var derived = typeof REPORT_DERIVED !== 'undefined' ? REPORT_DERIVED[i + 1] : null;
+      var v = derived ? reportDerivedValue(derived, src) : (col ? src[col - 1] : '');
       if (v === undefined || v === null) v = '';
       // A blank in the measure block means "nothing there", which has to read
       // as 0 to be summable. Outside that range a blank stays blank.
