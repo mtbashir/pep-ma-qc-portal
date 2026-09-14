@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '4.7',
+  VERSION: '4.8',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -2175,6 +2175,8 @@ function hmResumable(month, half) {
  * Returns progress; keep calling with reset:false until data.complete.
  */
 function buildHalfMonth(p) {
+  p = requireArgs(p, 'buildHalfMonth',
+    "Use the admin page's Build / rebuild button, which supplies the month and half.");
   var month = String(p.month || '').trim();
   var half = String(p.half || '').trim().toUpperCase();
   halfMonthDates(month, half);                     // validates both
@@ -2197,6 +2199,17 @@ function buildHalfMonth(p) {
 }
 
 /**
+ * Guards a function that needs arguments against being picked from the editor's
+ * Run dropdown, which passes none. Without this the failure is an opaque
+ * "Cannot read properties of undefined".
+ */
+function requireArgs(p, fname, instead) {
+  if (p && typeof p === 'object') return p;
+  throw new Error(fname + "() takes arguments, so it cannot be run from the " +
+    "editor Run button. " + instead);
+}
+
+/**
  * One-time: add the Drive link columns to a half-month file that predates them.
  *
  * Adds only the link columns and leaves every existing cell alone, so an old
@@ -2207,6 +2220,8 @@ function buildHalfMonth(p) {
  * From the editor:  backfillPhotoLinks({ month: '2026-08', half: 'H1' })
  */
 function backfillPhotoLinks(p) {
+  p = requireArgs(p, 'backfillPhotoLinks',
+    "Run backfillAllPhotoLinks() instead - it takes none and does every half-month file.");
   var month = String(p.month || '').trim();
   var half = String(p.half || '').trim().toUpperCase();
   halfMonthDates(month, half);                       // validates both
@@ -2717,6 +2732,8 @@ function rpReport(st) {
  * Keep calling with reset:false until data.complete.
  */
 function buildReporting(p) {
+  p = requireArgs(p, 'buildReporting',
+    "Use the admin page's Build / rebuild button, which runs it after the combine.");
   var month = String(p.month || '').trim();
   var half = String(p.half || '').trim().toUpperCase();
   halfMonthDates(month, half);                     // validates both
