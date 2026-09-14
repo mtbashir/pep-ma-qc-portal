@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '4.5',
+  VERSION: '4.6',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -50,6 +50,18 @@ var CONFIG = {
   // the half-month file inherits whatever rows were missing from them. Costs a
   // Drive copy + full read per date, so it roughly doubles build time.
   HALF_REFRESH: true,
+
+  // Drive links appended to the end of every half-month file, in Kobo order:
+  // Store, Pepsi, KO, Other, MT. One link per visit per folder, pointing at
+  // that visit's primary photo.
+  PHOTO_LINK_COLUMNS: [
+    ['GD LINK - STORE PHOTO',    'STORES PHOTOS'],
+    ['GD LINK - PEP COOLER',     'PEP COOLER'],
+    ['GD LINK - KO COOLER',      'KO COOLER'],
+    ['GD LINK - OTHERS COOLER',  'OTHERS COOLER'],
+    ['GD LINK - MT SHELVES',     'MT SHELVES']
+  ],
+  PHOTO_LINK_URL: 'https://drive.google.com/open?id=%ID%&usp=drive_fs',
 
   // Reporting format: the half-month sheet rewritten into the 402 columns the
   // reporting pack expects (column map in ReportMap.gs).
@@ -331,6 +343,7 @@ function route(p) {
     case 'listSessions': return listSessions();
     case 'listHalfMonths': return listHalfMonths();
     case 'buildHalfMonth': return buildHalfMonth(p);
+    case 'backfillPhotoLinks': return backfillPhotoLinks(p);
     case 'buildReporting': return buildReporting(p);
   }
   throw new Error('Unknown action: ' + action);
@@ -1636,6 +1649,43 @@ function hmHeaders(ssId, title) {
 }
 
 /**
+ * Visit _id -> Drive file id for one date's primary photo in each folder type.
+ *
+ * Filenames are "<CITY>_<STORE>_<VISIT ID>[_2|_3].<ext>" — the 2nd and 3rd photo
+ * of a category carry a _N suffix. Only the primary photo is linked, so the
+ * lowest suffix wins; a file whose name carries no visit id is ignored.
+ *
+ * Returns { '<folder type>': { '<_id>': '<file id>' } }.
+ */
+function hmPhotoIndex(date) {
+  var folders = photoFolders(date);
+  var out = {};
+  CONFIG.PHOTO_LINK_COLUMNS.forEach(function (spec) {
+    var type = spec[1];
+    var byId = {};
+    out[type] = byId;
+    if (!folders[type]) return;                     // folder absent for this date
+    var best = {};
+    driveList(folders[type]).forEach(function (f) {
+      var m = f.name.match(/_(\d{5,})(?:_(\d+))?\s*(?:\(\d+\))?\.[A-Za-z]+$/);
+      if (!m) return;
+      var id = m[1], rank = m[2] ? Number(m[2]) : 0;
+      if (!hasOwn(best, id) || rank < best[id]) { best[id] = rank; byId[id] = f.id; }
+    });
+  });
+  return out;
+}
+
+function photoLinkUrl(fileId) {
+  return CONFIG.PHOTO_LINK_URL.replace('%ID%', fileId);
+}
+
+/** The link columns, appended after everything else. */
+function photoLinkHeaders() {
+  return CONFIG.PHOTO_LINK_COLUMNS.map(function (c) { return c[0]; });
+}
+
+/**
  * Works out which dates go in and the exact column layout of the combined
  * sheet. Costs one header read per date in the half.
  */
@@ -1671,6 +1721,13 @@ function hmPlan(month, half) {
       extras.push(h);
       headers.push(h);
     });
+  });
+
+  // Last of all, so they never shift the positions the reporting map depends on.
+  photoLinkHeaders().forEach(function (h) {
+    if (hasOwn(seen, h)) return;
+    seen[h] = true;
+    headers.push(h);
   });
 
   return { dates: dates, latest: latest.date, latestSsId: latest.ssId,
@@ -1847,6 +1904,21 @@ function hmAppendDate(st, date, headers, index) {
   var idCol = srcHeaders.indexOf(CONFIG.ID_HEADER);
   var width = headers.length;
 
+  // One Drive listing per folder for this date, reused across all its rows.
+  var photos = null, linkCols = [];
+  if (idCol !== -1) {
+    try {
+      photos = hmPhotoIndex(date);
+      CONFIG.PHOTO_LINK_COLUMNS.forEach(function (spec) {
+        linkCols.push([hasOwn(index, spec[0]) ? index[spec[0]] : -1, spec[1]]);
+      });
+    } catch (e) {
+      // No photo folders for this date is not a reason to lose the day's data.
+      console.warn('photo links unavailable for ' + date + ': ' + ((e && e.message) || e));
+      photos = null;
+    }
+  }
+
   var out = [];
   for (var r = 1; r < rows.length; r++) {
     var src = rows[r];
@@ -1863,6 +1935,15 @@ function hmAppendDate(st, date, headers, index) {
       if (dst >= 0 && src[s] !== undefined && src[s] !== null) line[dst] = src[s];
     }
     if (dateCol >= 0) line[dateCol] = date;
+    if (photos) {
+      var vid = String(src[idCol]).replace(/\.0$/, '').trim();
+      for (var L = 0; L < linkCols.length; L++) {
+        var dstCol = linkCols[L][0];
+        if (dstCol < 0) continue;
+        var fid = photos[linkCols[L][1]] && photos[linkCols[L][1]][vid];
+        if (fid) line[dstCol] = photoLinkUrl(fid);
+      }
+    }
     out.push(line);
   }
 
@@ -2090,6 +2171,153 @@ function buildHalfMonth(p) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * One-time: add the Drive link columns to a half-month file that predates them.
+ *
+ * Adds only the link columns and leaves every existing cell alone, so an old
+ * month does not have to be rebuilt (which would re-refresh settled QC sheets
+ * and rewrite thousands of rows for five columns of gain).
+ *
+ * Idempotent — rerunning rewrites the same links, so it is safe to repeat.
+ * From the editor:  backfillPhotoLinks({ month: '2026-08', half: 'H1' })
+ */
+function backfillPhotoLinks(p) {
+  var month = String(p.month || '').trim();
+  var half = String(p.half || '').trim().toUpperCase();
+  halfMonthDates(month, half);                       // validates both
+
+  var name = halfMonthName(month, half);
+  var file = driveList(outputFolder().getId()).filter(function (f) {
+    return f.name.trim() === name && f.mimeType === 'application/vnd.google-apps.spreadsheet';
+  })[0];
+  if (!file) throw new Error('No "' + name + '" file to backfill — build it first.');
+
+  var props = hmSheetProps(file.id);
+  var tab = props.title;
+  var headers = hmHeaders(file.id, tab);
+  var wanted = photoLinkHeaders();
+
+  // Reuse the columns if they are already there, otherwise append the block.
+  var at = wanted.map(function (h) { return headers.indexOf(h); });
+  var first;
+  if (at.every(function (i) { return i >= 0; }) &&
+      at[at.length - 1] - at[0] === at.length - 1) {
+    first = at[0] + 1;                               // 1-based, already contiguous
+  } else {
+    first = headers.length + 1;
+    if (props.cols < first + wanted.length - 1) {
+      hmSetGridWidth(file.id, props, first + wanted.length - 1);
+    }
+    valuesBatchUpdate(file.id, [{
+      range: quoteSheet(tab) + '!' + colLetter(first) + '1:' +
+             colLetter(first + wanted.length - 1) + '1',
+      values: [wanted]
+    }]);
+  }
+
+  // Only two columns are needed to place every link: the visit id and its date.
+  var idCol = headers.indexOf(CONFIG.ID_HEADER) + 1;
+  var dCol = headers.indexOf(CONFIG.SOURCE_DATE_HEADER) + 1;
+  if (!idCol) throw new Error('"' + CONFIG.ID_HEADER + '" column not found in ' + name);
+  if (!dCol) throw new Error('"' + CONFIG.SOURCE_DATE_HEADER + '" column not found in ' + name);
+
+  var lo = Math.min(idCol, dCol), hi = Math.max(idCol, dCol);
+  var got = valuesBatchGet(file.id, [quoteSheet(tab) + '!' + colLetter(lo) + '2:' +
+                                     colLetter(hi) + props.rows]);
+  var keys = (got[0] && got[0].values) || [];
+
+  var cache = {}, block = [], filled = 0, rows = 0;
+  for (var r = 0; r < keys.length; r++) {
+    var row = keys[r] || [];
+    var vid = String(row[idCol - lo] === undefined ? '' : row[idCol - lo]).replace(/\.0$/, '').trim();
+    var date = String(row[dCol - lo] === undefined ? '' : row[dCol - lo]).trim();
+    var line = ['', '', '', '', ''];
+    if (vid && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      rows++;
+      if (!hasOwn(cache, date)) {
+        try { cache[date] = hmPhotoIndex(date); }
+        catch (e) { cache[date] = null; console.warn('no photo folders for ' + date); }
+      }
+      var idx = cache[date];
+      if (idx) {
+        for (var c = 0; c < CONFIG.PHOTO_LINK_COLUMNS.length; c++) {
+          var type = CONFIG.PHOTO_LINK_COLUMNS[c][1];
+          var fid = idx[type] && idx[type][vid];
+          if (fid) { line[c] = photoLinkUrl(fid); filled++; }
+        }
+      }
+    }
+    block.push(line);
+  }
+
+  if (block.length) {
+    var per = Math.max(1, Math.floor(CONFIG.HALF_APPEND_CELLS / wanted.length));
+    for (var i = 0; i < block.length; i += per) {
+      var chunk = block.slice(i, i + per);
+      valuesBatchUpdate(file.id, [{
+        range: quoteSheet(tab) + '!' + colLetter(first) + (2 + i) + ':' +
+               colLetter(first + wanted.length - 1) + (1 + i + chunk.length),
+        values: chunk
+      }]);
+    }
+  }
+
+  var msg = name + ': ' + filled + ' link(s) written across ' + rows + ' row(s), ' +
+            Object.keys(cache).length + ' date(s)';
+  console.log(msg);
+  return { ok: true, data: { name: name, rows: rows, links: filled,
+           dates: Object.keys(cache).length,
+           url: 'https://docs.google.com/spreadsheets/d/' + file.id + '/edit' } };
+}
+
+/** Widen a sheet's grid to at least `cols` columns. */
+function hmSetGridWidth(ssId, props, cols) {
+  if (props.cols >= cols) return;
+  if (sheetsReady()) {
+    try {
+      Sheets.Spreadsheets.batchUpdate({ requests: [{
+        updateSheetProperties: {
+          properties: { sheetId: props.sheetId, gridProperties: { columnCount: cols } },
+          fields: 'gridProperties.columnCount'
+        }
+      }] }, ssId);
+      props.cols = cols;
+      return;
+    } catch (e) { sheetsFailed(e); }
+  }
+  var sh = openSs(ssId).getSheetByName(props.title);
+  sh.insertColumnsAfter(sh.getMaxColumns(), cols - sh.getMaxColumns());
+  props.cols = cols;
+}
+
+/**
+ * One-time: backfill Drive links into every half-month file that already exists.
+ *
+ * Run from the editor's function dropdown — it takes no arguments. Stops when
+ * the time budget is spent and reports what is left; backfilling is idempotent,
+ * so just run it again to carry on.
+ */
+function backfillAllPhotoLinks() {
+  var t0 = Date.now();
+  var done = [], left = [];
+  listHalfMonths().data.forEach(function (h) {
+    if (!h.built) return;
+    if (Date.now() - t0 > CONFIG.HALF_BUDGET_MS) { left.push(h.month + ' ' + h.half); return; }
+    try {
+      var res = backfillPhotoLinks({ month: h.month, half: h.half }).data;
+      done.push(res.name + ': ' + res.links + ' link(s) over ' + res.rows + ' row(s)');
+    } catch (e) {
+      done.push(halfMonthName(h.month, h.half) + ': SKIPPED — ' + ((e && e.message) || e));
+    }
+  });
+  var nl = String.fromCharCode(10);
+  var msg = 'Backfilled:' + nl + '  ' + (done.join(nl + '  ') || '(nothing to do)') +
+            (left.length ? nl + 'Still to do (run again): ' + left.join(', ')
+                        : nl + 'All half-month files done.');
+  console.log(msg);
+  return msg;
 }
 
 /** Every half-month that has photo dates, newest first, flagged if built. */

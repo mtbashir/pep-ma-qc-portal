@@ -192,6 +192,30 @@ Four columns in the range hold text rather than numbers, so a blank there
 becomes `0` alongside Yes/No values: the three `SWITCHED ON` columns (#28, #59,
 #90) and `4.4.1: MSL Compliance(GT)` (#125).
 
+### Drive photo links
+
+Every half-month file ends with five Drive links per row, in Kobo order:
+
+| Column | Folder |
+|--------|--------|
+| `GD LINK - STORE PHOTO`   | STORES PHOTOS |
+| `GD LINK - PEP COOLER`    | PEP COOLER |
+| `GD LINK - KO COOLER`     | KO COOLER |
+| `GD LINK - OTHERS COOLER` | OTHERS COOLER |
+| `GD LINK - MT SHELVES`    | MT SHELVES |
+
+Each is `https://drive.google.com/open?id=<file id>&usp=drive_fs` for that visit's
+**primary** photo in that folder. Where a category has a 2nd or 3rd photo
+(`..._2.jpg`), only the first is linked; a visit with no photo of a type is left
+blank. They are appended after the source-date and extra columns, so they never
+shift the positions `ReportMap.gs` depends on.
+
+Built automatically from now on. For a file that predates them, run
+`backfillAllPhotoLinks()` once from the editor — it adds just the five columns to
+each existing half-month file, leaving every other cell untouched, so a settled
+month does not need a full rebuild. It is idempotent, and if it runs out of time
+it says which files are left; run it again to finish.
+
 ### Running it
 
 Admin page → **Half-month combined sheet** → pick the half → **Build / rebuild**.
