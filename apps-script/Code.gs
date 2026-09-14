@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '4.6',
+  VERSION: '4.7',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -54,12 +54,16 @@ var CONFIG = {
   // Drive links appended to the end of every half-month file, in Kobo order:
   // Store, Pepsi, KO, Other, MT. One link per visit per folder, pointing at
   // that visit's primary photo.
-  PHOTO_LINK_COLUMNS: [
-    ['GD LINK - STORE PHOTO',    'STORES PHOTOS'],
-    ['GD LINK - PEP COOLER',     'PEP COOLER'],
-    ['GD LINK - KO COOLER',      'KO COOLER'],
-    ['GD LINK - OTHERS COOLER',  'OTHERS COOLER'],
-    ['GD LINK - MT SHELVES',     'MT SHELVES']
+  // [folder, column name, how many photos that category can hold]. The counts
+  // mirror config.json's categories in kobo_daily.py — STORES has 2 questions,
+  // each cooler 3, MT 1 — and match what the folders actually contain. The 2nd
+  // and 3rd photo are named "... 2" / "... 3"; the first keeps the bare name.
+  PHOTO_LINK_SLOTS: [
+    ['STORES PHOTOS',   'GD LINK - STORE PHOTO',   2],
+    ['PEP COOLER',      'GD LINK - PEP COOLER',    3],
+    ['KO COOLER',       'GD LINK - KO COOLER',     3],
+    ['OTHERS COOLER',   'GD LINK - OTHERS COOLER', 3],
+    ['MT SHELVES',      'GD LINK - MT SHELVES',    1]
   ],
   PHOTO_LINK_URL: 'https://drive.google.com/open?id=%ID%&usp=drive_fs',
 
@@ -1660,17 +1664,20 @@ function hmHeaders(ssId, title) {
 function hmPhotoIndex(date) {
   var folders = photoFolders(date);
   var out = {};
-  CONFIG.PHOTO_LINK_COLUMNS.forEach(function (spec) {
-    var type = spec[1];
+  CONFIG.PHOTO_LINK_SLOTS.forEach(function (slot) {
+    var type = slot[0];
     var byId = {};
     out[type] = byId;
     if (!folders[type]) return;                     // folder absent for this date
-    var best = {};
     driveList(folders[type]).forEach(function (f) {
       var m = f.name.match(/_(\d{5,})(?:_(\d+))?\s*(?:\(\d+\))?\.[A-Za-z]+$/);
       if (!m) return;
-      var id = m[1], rank = m[2] ? Number(m[2]) : 0;
-      if (!hasOwn(best, id) || rank < best[id]) { best[id] = rank; byId[id] = f.id; }
+      var id = m[1];
+      // "_2" is the second photo, so slot 1; an unsuffixed name is slot 0.
+      var slotNo = m[2] ? Number(m[2]) - 1 : 0;
+      if (slotNo < 0 || slotNo >= slot[2]) return;
+      if (!hasOwn(byId, id)) byId[id] = [];
+      byId[id][slotNo] = f.id;
     });
   });
   return out;
@@ -1680,9 +1687,24 @@ function photoLinkUrl(fileId) {
   return CONFIG.PHOTO_LINK_URL.replace('%ID%', fileId);
 }
 
-/** The link columns, appended after everything else. */
+/**
+ * Every link column, in order: all of Store's, then Pepsi's, KO's, Other's, MT's.
+ * Returns [{ header, folder, slot }] — slot 0 is the category's first photo.
+ */
+function photoLinkSlots() {
+  var out = [];
+  CONFIG.PHOTO_LINK_SLOTS.forEach(function (spec) {
+    for (var i = 0; i < spec[2]; i++) {
+      out.push({ header: i === 0 ? spec[1] : spec[1] + ' ' + (i + 1),
+                 folder: spec[0], slot: i });
+    }
+  });
+  return out;
+}
+
+/** Just the column names, appended after everything else. */
 function photoLinkHeaders() {
-  return CONFIG.PHOTO_LINK_COLUMNS.map(function (c) { return c[0]; });
+  return photoLinkSlots().map(function (s) { return s.header; });
 }
 
 /**
@@ -1909,8 +1931,8 @@ function hmAppendDate(st, date, headers, index) {
   if (idCol !== -1) {
     try {
       photos = hmPhotoIndex(date);
-      CONFIG.PHOTO_LINK_COLUMNS.forEach(function (spec) {
-        linkCols.push([hasOwn(index, spec[0]) ? index[spec[0]] : -1, spec[1]]);
+      photoLinkSlots().forEach(function (sp) {
+        linkCols.push([hasOwn(index, sp.header) ? index[sp.header] : -1, sp.folder, sp.slot]);
       });
     } catch (e) {
       // No photo folders for this date is not a reason to lose the day's data.
@@ -1940,7 +1962,8 @@ function hmAppendDate(st, date, headers, index) {
       for (var L = 0; L < linkCols.length; L++) {
         var dstCol = linkCols[L][0];
         if (dstCol < 0) continue;
-        var fid = photos[linkCols[L][1]] && photos[linkCols[L][1]][vid];
+        var forId = photos[linkCols[L][1]] && photos[linkCols[L][1]][vid];
+        var fid = forId && forId[linkCols[L][2]];
         if (fid) line[dstCol] = photoLinkUrl(fid);
       }
     }
@@ -2197,7 +2220,8 @@ function backfillPhotoLinks(p) {
   var props = hmSheetProps(file.id);
   var tab = props.title;
   var headers = hmHeaders(file.id, tab);
-  var wanted = photoLinkHeaders();
+  var slots = photoLinkSlots();
+  var wanted = slots.map(function (x) { return x.header; });
 
   // Reuse the columns if they are already there, otherwise append the block.
   var at = wanted.map(function (h) { return headers.indexOf(h); });
@@ -2233,7 +2257,8 @@ function backfillPhotoLinks(p) {
     var row = keys[r] || [];
     var vid = String(row[idCol - lo] === undefined ? '' : row[idCol - lo]).replace(/\.0$/, '').trim();
     var date = String(row[dCol - lo] === undefined ? '' : row[dCol - lo]).trim();
-    var line = ['', '', '', '', ''];
+    var line = [];
+    for (var z = 0; z < wanted.length; z++) line.push('');
     if (vid && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
       rows++;
       if (!hasOwn(cache, date)) {
@@ -2242,9 +2267,9 @@ function backfillPhotoLinks(p) {
       }
       var idx = cache[date];
       if (idx) {
-        for (var c = 0; c < CONFIG.PHOTO_LINK_COLUMNS.length; c++) {
-          var type = CONFIG.PHOTO_LINK_COLUMNS[c][1];
-          var fid = idx[type] && idx[type][vid];
+        for (var c = 0; c < slots.length; c++) {
+          var forId = idx[slots[c].folder] && idx[slots[c].folder][vid];
+          var fid = forId && forId[slots[c].slot];
           if (fid) { line[c] = photoLinkUrl(fid); filled++; }
         }
       }

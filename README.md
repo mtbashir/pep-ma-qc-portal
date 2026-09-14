@@ -194,21 +194,25 @@ becomes `0` alongside Yes/No values: the three `SWITCHED ON` columns (#28, #59,
 
 ### Drive photo links
 
-Every half-month file ends with five Drive links per row, in Kobo order:
+Every half-month file ends with **12** Drive links per row — every photo a visit
+can have, in Kobo order:
 
-| Column | Folder |
-|--------|--------|
-| `GD LINK - STORE PHOTO`   | STORES PHOTOS |
-| `GD LINK - PEP COOLER`    | PEP COOLER |
-| `GD LINK - KO COOLER`     | KO COOLER |
-| `GD LINK - OTHERS COOLER` | OTHERS COOLER |
-| `GD LINK - MT SHELVES`    | MT SHELVES |
+| Columns | Folder | Count |
+|---------|--------|-------|
+| `GD LINK - STORE PHOTO`, `… 2`             | STORES PHOTOS | 2 |
+| `GD LINK - PEP COOLER`, `… 2`, `… 3`       | PEP COOLER    | 3 |
+| `GD LINK - KO COOLER`, `… 2`, `… 3`        | KO COOLER     | 3 |
+| `GD LINK - OTHERS COOLER`, `… 2`, `… 3`    | OTHERS COOLER | 3 |
+| `GD LINK - MT SHELVES`                      | MT SHELVES    | 1 |
 
-Each is `https://drive.google.com/open?id=<file id>&usp=drive_fs` for that visit's
-**primary** photo in that folder. Where a category has a 2nd or 3rd photo
-(`..._2.jpg`), only the first is linked; a visit with no photo of a type is left
-blank. They are appended after the source-date and extra columns, so they never
-shift the positions `ReportMap.gs` depends on.
+The counts mirror `config.json`'s `categories` in the downloader — STORES asks two
+photo questions, each cooler three, MT one — and match what the folders actually
+hold. Each cell is `https://drive.google.com/open?id=<file id>&usp=drive_fs`.
+
+The downloader names the 2nd and 3rd photo of a category `..._2.jpg` / `..._3.jpg`,
+so `_2` fills the `… 2` column. A slot with no photo is blank. The columns are
+appended after the source-date and extra columns, so they never shift the
+positions `ReportMap.gs` depends on.
 
 Built automatically from now on. For a file that predates them, run
 `backfillAllPhotoLinks()` once from the editor — it adds just the five columns to
