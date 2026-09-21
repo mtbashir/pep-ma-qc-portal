@@ -214,6 +214,11 @@ so `_2` fills the `… 2` column. A slot with no photo is blank. The columns are
 appended after the source-date and extra columns, so they never shift the
 positions `ReportMap.gs` depends on.
 
+The **reporting** files carry the same 12 links in columns **OM:OX** (403–414),
+straight after the 402 mapped columns. They are copied from the half-month file by
+header name, so extra columns from a mid-month question change can't misplace them,
+and they are outside the O:DX zero-fill, so a missing photo stays blank.
+
 Built automatically from now on. For a file that predates them, run
 `backfillAllPhotoLinks()` once from the editor — it adds just the five columns to
 each existing half-month file, leaving every other cell untouched, so a settled

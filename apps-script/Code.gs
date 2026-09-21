@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '4.8',
+  VERSION: '4.9',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -2448,6 +2448,7 @@ function hmAutoStep() {
           return;
         }
         var rst = auto.rpFresh === false ? rpGetState(job.month, job.half) : null;
+        if (rst && !rst.linkSrc) rst = null;          // predates the link columns
         if (!rst) rst = rpStart(job.month, job.half);
         rst = rpRunBudget(rst, left);
         rpSetState(rst);
@@ -2588,7 +2589,12 @@ function rpStart(month, half) {
       '  Regenerate ReportMap.gs, or set CONFIG.REPORT_STRICT = false to build anyway.');
   }
 
-  var headers = reportHeaders();
+  // The 402 mapped columns, then the Drive photo links (OM onwards). The links
+  // are found in the half-month sheet by header name, not position — extra
+  // columns from mid-month question changes sit between them and the rest.
+  var links = photoLinkHeaders();
+  var headers = reportHeaders().concat(links);
+  var linkSrc = links.map(function (h) { return srcHeaders.indexOf(h) + 1; });  // 0 = absent
   var name = reportName(month, half);
   var existing = files.filter(function (f) {
     return f.name.trim() === name && f.mimeType === 'application/vnd.google-apps.spreadsheet';
@@ -2618,6 +2624,7 @@ function rpStart(month, half) {
     ssId: ssId, tab: props.title,
     srcId: src.id, srcTab: srcProps.title,
     srcRows: srcProps.rows, srcCols: srcProps.cols,
+    linkSrc: linkSrc,
     nextRow: 2,                    // next source row to read (row 1 is the header)
     rows: 0,
     cols: headers.length,
@@ -2667,7 +2674,7 @@ function rpCopyChunk(st, dateCol) {
       var d = src[dateCol - 1];
       if (d === undefined || d === null || String(d).trim() === '') continue;
     }
-    var line = new Array(REPORT_MAP.length);
+    var line = new Array(st.cols);
     for (var i = 0; i < REPORT_MAP.length; i++) {
       var col = REPORT_MAP[i][1];
       var derived = typeof REPORT_DERIVED !== 'undefined' ? REPORT_DERIVED[i + 1] : null;
@@ -2678,12 +2685,17 @@ function rpCopyChunk(st, dateCol) {
       if (v === '' && reportZeroFilled(i + 1)) v = 0;
       line[i] = v;
     }
+    var ls = st.linkSrc || [];
+    for (var k = 0; k < st.cols - REPORT_MAP.length; k++) {
+      var lv = ls[k] ? src[ls[k] - 1] : '';
+      line[REPORT_MAP.length + k] = (lv === undefined || lv === null) ? '' : lv;
+    }
     out.push(line);
   }
 
   if (out.length) {
     hmAppendRows({ ssId: st.ssId, tab: st.tab, month: st.month, half: st.half },
-                 out, REPORT_MAP.length);
+                 out, st.cols);
     st.rows += out.length;
   }
   var consumed = last - st.nextRow + 1;
@@ -2745,6 +2757,7 @@ function buildReporting(p) {
   try {
     var st = p.reset ? null : rpGetState(month, half);
     if (st && (st.nextRow > st.srcRows)) st = null;                  // finished -> rebuild
+    if (st && !st.linkSrc) st = null;                                // predates link columns
     if (st) {
       var rAge = new Date().getTime() - new Date(st.startedAt || 0).getTime();
       if (!(rAge >= 0) || rAge > CONFIG.HALF_RESUME_MAX_MS) st = null;
