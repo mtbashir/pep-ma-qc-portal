@@ -255,6 +255,7 @@
 
   $('half-pick').addEventListener('change', function () {
     $('btn-half-build').disabled = !this.value;
+    $('btn-report-only').disabled = !this.value;
     var opt = this.selectedOptions[0];
     var link = $('half-link');
     if (opt && opt.dataset.url) { link.href = opt.dataset.url; link.classList.remove('hidden'); }
@@ -342,6 +343,49 @@
     } finally {
       btn.disabled = false;
       btn.textContent = '▣ Build / rebuild';
+    }
+  });
+
+
+  /* Rebuild only the reporting cut. Pressing Build restarts the whole combine
+   * (15 dates, each refreshed from Kobo), and reporting runs only once that
+   * finishes — so refreshing the report alone used to mean sitting through a
+   * half-hour recombine, and closing the tab left no report at all. */
+  $('btn-report-only').addEventListener('click', async function () {
+    var v = $('half-pick').value;
+    if (!v) return;
+    var parts = v.split('|'), month = parts[0], half = parts[1];
+    var btn = this;
+    btn.disabled = true;
+    $('half-status').classList.remove('hidden');
+    var rep = null, guard = 0;
+    try {
+      while (guard++ < 80) {
+        btn.textContent = 'Reporting… ' + (rep ? rep.rows + ' rows' : '');
+        rep = await window.QCApi.call('buildReporting', { month: month, half: half });
+        $('half-status').textContent = rep.rows + ' of ' + rep.sourceRows + ' rows · ' +
+          rep.columns + ' columns';
+        if (rep.complete) break;
+      }
+      if (!rep || !rep.complete) {
+        toast('Still going — press Reporting only again to carry on.', 'err');
+        return;
+      }
+      $('report-link').href = rep.url;
+      $('report-link').classList.remove('hidden');
+      $('half-status').textContent = rep.name + ' — ' + rep.rows + ' rows × ' +
+        rep.columns + ' columns from ' + rep.source +
+        ((rep.warnings && rep.warnings.length)
+          ? '. ' + rep.warnings.length + ' column(s) left blank: ' + rep.warnings.slice(0, 3).join('; ')
+          : '.');
+      toast('Reporting sheet ready ✔', 'ok');
+    } catch (e) {
+      if (e.staleSession) return;
+      toast('Reporting failed: ' + e.message, 'err');
+      if (e.auth) showLogin();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '⟳ Reporting only';
     }
   });
 

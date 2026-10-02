@@ -229,6 +229,15 @@ it says which files are left; run it again to finish.
 
 Admin page → **Half-month combined sheet** → pick the half → **Build / rebuild**.
 
+**Build / rebuild** always redoes the whole combine — every date refreshed from
+Kobo — and the reporting cut runs only once that finishes. For a full half-month
+that is several passes of a few minutes each, and the tab has to stay open for
+all of them; close it early and you get a rebuilt combine with no report.
+
+**⟳ Reporting only** rebuilds just the reporting cut from the combined file
+that is already there. Use it when the combine is current and only the report
+needs refreshing — after a `ReportMap.gs` change, say.
+
 A rebuild **reuses the same file**, wiping and refilling it, so a link you have
 shared or bookmarked keeps working. Wiping resizes the grid back to a single
 header row: `Values.clear()` empties the cells but leaves the rows in place, and

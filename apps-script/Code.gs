@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '5.1',
+  VERSION: '5.2',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -2443,7 +2443,7 @@ function buildReportingNow() {
   try {
     do {
       r = buildReporting({ month: h.month, half: h.half }).data;
-      lines.push('  row ' + r.nextRow + '/' + r.srcRows + ', ' + r.rows + ' written');
+      lines.push('  ' + r.rows + ' of ' + r.sourceRows + ' row(s) written');
     } while (!r.complete && guard++ < 60);
     lines.push(r.complete ? 'DONE: ' + r.rows + ' rows x ' + r.columns + ' columns -> ' + r.url
                           : 'STOPPED early — run again to continue.');
