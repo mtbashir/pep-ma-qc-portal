@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '5.0',
+  VERSION: '5.1',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -2356,6 +2356,101 @@ function backfillAllPhotoLinks() {
   var msg = 'Backfilled:' + nl + '  ' + (done.join(nl + '  ') || '(nothing to do)') +
             (left.length ? nl + 'Still to do (run again): ' + left.join(', ')
                         : nl + 'All half-month files done.');
+  console.log(msg);
+  return msg;
+}
+
+/**
+ * Read-only: why is the reporting file for the newest half-month not building?
+ *
+ * Takes no arguments so it can be run from the editor's Run button, and writes
+ * everything to the execution log, which outlives the admin page's 3-second
+ * toast. Changes nothing.
+ */
+function diagnoseReporting() {
+  var nl = String.fromCharCode(10);
+  var out = [];
+  var halves = listHalfMonths().data;
+  var built = halves.filter(function (h) { return h.built; });
+  out.push('half-months with a combined file: ' +
+           (built.map(function (h) { return h.month + ' ' + h.half; }).join(', ') || '(none)'));
+  if (!built.length) { console.log(out.join(nl)); return out.join(nl); }
+
+  var h = built[0];                                   // newest first
+  var srcName = halfMonthName(h.month, h.half);
+  out.push('');
+  out.push('newest: ' + srcName);
+
+  var files = driveList(outputFolder().getId());
+  var src = files.filter(function (f) {
+    return f.name.trim() === srcName && f.mimeType === 'application/vnd.google-apps.spreadsheet';
+  })[0];
+  var props = hmSheetProps(src.id);
+  var headers = hmHeaders(src.id, props.title);
+  out.push('  tab "' + props.title + '", grid ' + props.rows + ' x ' + props.cols +
+           ', ' + headers.length + ' header(s)');
+
+  var idx = headers.indexOf(CONFIG.ID_HEADER) + 1;
+  var dc = headers.indexOf(CONFIG.SOURCE_DATE_HEADER) + 1;
+  out.push('  "' + CONFIG.ID_HEADER + '" at ' + (idx || 'MISSING') +
+           ', "' + CONFIG.SOURCE_DATE_HEADER + '" at ' + (dc || 'MISSING'));
+
+  var lh = photoLinkHeaders();
+  var have = lh.filter(function (x) { return headers.indexOf(x) !== -1; }).length;
+  out.push('  photo link columns present: ' + have + ' of ' + lh.length);
+
+  var res = reportResolve(headers);
+  out.push('');
+  out.push('reporting map vs this header row:');
+  out.push('  resolved at the recorded position: ' +
+           (res.cols.filter(function (c) { return c; }).length - res.moved.length));
+  out.push('  followed by name after a shift  : ' + res.moved.length +
+           (res.moved.length ? '  e.g. ' + res.moved.slice(0, 3).join('; ') : ''));
+  out.push('  left blank (column gone)        : ' + res.missing.length +
+           (res.missing.length ? '  ' + res.missing.slice(0, 6).join('; ') : ''));
+  out.push('  AMBIGUOUS (duplicate title)     : ' + res.ambiguous.length +
+           (res.ambiguous.length ? '  ' + res.ambiguous.slice(0, 6).join('; ') : ''));
+  if (res.ambiguous.length && CONFIG.REPORT_STRICT) {
+    out.push('  -> REPORT_STRICT is on, so the build REFUSES on the duplicate(s) above.');
+  } else {
+    out.push('  -> nothing here would stop the build.');
+  }
+
+  var repName = reportName(h.month, h.half);
+  var rep = files.filter(function (f) { return f.name.trim() === repName; })[0];
+  out.push('');
+  out.push(repName + ': ' + (rep ? 'exists' : 'DOES NOT EXIST'));
+  var st = rpGetState(h.month, h.half);
+  out.push('saved reporting progress: ' + (st ? ('row ' + st.nextRow + ' of ' + st.srcRows +
+           ', ' + st.rows + ' written, started ' + st.startedAt) : 'none'));
+
+  var msg = out.join(nl);
+  console.log(msg);
+  return msg;
+}
+
+/**
+ * Builds the newest half-month's reporting file to completion, logging each
+ * pass and any error. Takes no arguments, for the editor's Run button.
+ */
+function buildReportingNow() {
+  var nl = String.fromCharCode(10);
+  var built = listHalfMonths().data.filter(function (h) { return h.built; });
+  if (!built.length) { console.log('No combined half-month file to report on.'); return 'nothing to do'; }
+  var h = built[0];
+  var lines = ['building ' + reportName(h.month, h.half) + ' ...'];
+  var r = null, guard = 0;
+  try {
+    do {
+      r = buildReporting({ month: h.month, half: h.half }).data;
+      lines.push('  row ' + r.nextRow + '/' + r.srcRows + ', ' + r.rows + ' written');
+    } while (!r.complete && guard++ < 60);
+    lines.push(r.complete ? 'DONE: ' + r.rows + ' rows x ' + r.columns + ' columns -> ' + r.url
+                          : 'STOPPED early — run again to continue.');
+  } catch (e) {
+    lines.push('FAILED: ' + ((e && e.message) || e));
+  }
+  var msg = lines.join(nl);
   console.log(msg);
   return msg;
 }
