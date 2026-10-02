@@ -11,10 +11,11 @@
  * columns, then the 30 QC columns, then "QC Source Date" — 449 columns.
  * 0 means the reporting column has no source and is left blank.
  *
- * The expected source title is checked against the live header before any data
- * is copied. The mapping is POSITIONAL, so if a Kobo question is added or
- * removed every column after it shifts and the whole report would be silently
- * wrong — the check turns that into a loud failure instead.
+ * The expected source title is what actually resolves the column. The number is
+ * only a hint that makes the usual case a single lookup: if the title has moved
+ * it is followed, and if it is gone the column is left blank and reported. Kobo
+ * dropped "_notes" and "_tags" at the end of September 2026, shifting 36 mapped
+ * columns two to the left — positions alone would have been silently wrong.
  *
  * Four entries deliberately differ from Sheet3's numbers. Sheet3 assumed the
  * PEP option order (Backend Inside, then Outside) held for the KO and OTHERS

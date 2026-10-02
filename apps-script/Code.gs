@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '4.9',
+  VERSION: '5.0',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -2536,23 +2536,64 @@ function reportHeaders() {
  * Confirms the half-month sheet still looks the way the map was built for.
  * Returns a list of human-readable problems; empty means it is safe to copy.
  */
-function reportCheckHeader(srcHeaders) {
-  var problems = [];
+/**
+ * Works out which source column feeds each reporting column, for one live
+ * half-month header row.
+ *
+ * The map carries both a column NUMBER and the title that was at it. The number
+ * alone is brittle: Kobo questions come and go, and because the QC columns are
+ * appended after the Kobo block, losing one Kobo column shifts everything after
+ * it. That is exactly what happened when Kobo dropped "_notes" and "_tags" —
+ * 38 mapped columns moved two to the left and the whole report was refused.
+ *
+ * So the title wins. The number is only a hint that makes the common case a
+ * single array lookup:
+ *   1. title already sits at the recorded number -> use it
+ *   2. title is somewhere else -> follow it, and say so
+ *   3. title is nowhere -> that column is genuinely gone; leave it blank
+ *
+ * Data can no longer land under the wrong heading, so a missing column is a
+ * note rather than a reason to produce nothing. A title appearing twice IS
+ * ambiguous, and that is what REPORT_STRICT now guards.
+ *
+ * Returns { cols, moved, missing, ambiguous } — cols is 1-based, 0 for blank.
+ */
+function reportResolve(srcHeaders) {
+  var where = {};
+  for (var h = 0; h < srcHeaders.length; h++) {
+    var t = String(srcHeaders[h] || '');
+    if (!t) continue;
+    if (hasOwn(where, t)) where[t] = -1;                 // seen twice: ambiguous
+    else where[t] = h + 1;
+  }
+
+  var cols = [], moved = [], missing = [], ambiguous = [];
   for (var i = 0; i < REPORT_MAP.length; i++) {
     var col = REPORT_MAP[i][1];
-    if (!col) continue;                                  // deliberately blank
-    if (col > srcHeaders.length) {
-      problems.push('reporting column ' + (i + 1) + ' "' + REPORT_MAP[i][0] +
-        '" needs source column ' + col + ' but the sheet only has ' + srcHeaders.length);
+    var want = String(REPORT_MAP[i][2] || '');
+    if (!col) { cols.push(0); continue; }                // deliberately blank
+
+    if (!want) {                                         // no title recorded; trust the number
+      cols.push(col <= srcHeaders.length ? col : 0);
       continue;
     }
-    var want = String(REPORT_MAP[i][2] || '');
-    var got = String(srcHeaders[col - 1] || '');
-    if (want && want !== got) {
-      problems.push('source column ' + col + ' should be "' + want + '" but is "' + got + '"');
+    if (col <= srcHeaders.length && String(srcHeaders[col - 1] || '') === want) {
+      cols.push(col);
+      continue;
+    }
+    var at = hasOwn(where, want) ? where[want] : 0;
+    if (at === -1) {
+      ambiguous.push('"' + want + '" appears more than once');
+      cols.push(0);
+    } else if (at > 0) {
+      moved.push(REPORT_MAP[i][0] + ': ' + col + ' -> ' + at);
+      cols.push(at);
+    } else {
+      missing.push(REPORT_MAP[i][0] + ' (no "' + want + '" column)');
+      cols.push(0);
     }
   }
-  return problems;
+  return { cols: cols, moved: moved, missing: missing, ambiguous: ambiguous };
 }
 
 function rpStateKey(month, half) { return 'RP|' + month + '|' + half; }
@@ -2581,12 +2622,21 @@ function rpStart(month, half) {
   var srcProps = hmSheetProps(src.id);
   var srcHeaders = hmHeaders(src.id, srcProps.title);
 
-  var problems = reportCheckHeader(srcHeaders);
-  if (problems.length && CONFIG.REPORT_STRICT) {
-    throw new Error('"' + srcName + '" no longer matches the reporting map, so the report ' +
-      'would be wrong. ' + problems.length + ' problem(s): ' + problems.slice(0, 5).join('; ') +
-      (problems.length > 5 ? ' …' : '') +
-      '  Regenerate ReportMap.gs, or set CONFIG.REPORT_STRICT = false to build anyway.');
+  var res = reportResolve(srcHeaders);
+  if (res.ambiguous.length && CONFIG.REPORT_STRICT) {
+    throw new Error('"' + srcName + '" has duplicate column titles, so the reporting map ' +
+      'cannot tell which to use: ' + res.ambiguous.slice(0, 5).join('; ') +
+      (res.ambiguous.length > 5 ? ' …' : '') +
+      '  Fix the duplicate heading, or set CONFIG.REPORT_STRICT = false to build anyway.');
+  }
+  var problems = res.missing.concat(res.ambiguous);
+  if (res.moved.length) {
+    console.log('reporting: ' + res.moved.length + ' column(s) followed by name, e.g. ' +
+                res.moved.slice(0, 3).join('; '));
+  }
+  if (res.missing.length) {
+    console.warn('reporting: ' + res.missing.length + ' column(s) left blank — ' +
+                 res.missing.slice(0, 5).join('; '));
   }
 
   // The 402 mapped columns, then the Drive photo links (OM onwards). The links
@@ -2624,6 +2674,16 @@ function rpStart(month, half) {
     ssId: ssId, tab: props.title,
     srcId: src.id, srcTab: srcProps.title,
     srcRows: srcProps.rows, srcCols: srcProps.cols,
+    map: res.cols,                 // resolved source column per reporting column
+    colShift: (function () {       // old source column -> where it actually is
+      var o = {};
+      for (var i = 0; i < REPORT_MAP.length; i++) {
+        var from = REPORT_MAP[i][1];
+        if (from && res.cols[i] && res.cols[i] !== from) o[String(from)] = res.cols[i];
+      }
+      return o;
+    })(),
+    moved: res.moved.length,
     linkSrc: linkSrc,
     nextRow: 2,                    // next source row to read (row 1 is the header)
     rows: 0,
@@ -2638,9 +2698,16 @@ function rpStart(month, half) {
  * Returns how many source rows were consumed.
  */
 /** 1 when every named source column is truthy, else 0. */
-function reportDerivedValue(rule, src) {
+function reportDerivedValue(rule, src, shift) {
   var cols = rule && rule.and;
   if (!cols || !cols.length) return 0;
+  // REPORT_DERIVED names raw source columns, so put them through the same
+  // old -> new table the mapped columns used.
+  if (shift) {
+    cols = cols.map(function (c) {
+      return hasOwn(shift, String(c)) ? shift[String(c)] : c;
+    });
+  }
   for (var i = 0; i < cols.length; i++) {
     var v = src[cols[i] - 1];
     if (v === undefined || v === null) return 0;
@@ -2676,9 +2743,9 @@ function rpCopyChunk(st, dateCol) {
     }
     var line = new Array(st.cols);
     for (var i = 0; i < REPORT_MAP.length; i++) {
-      var col = REPORT_MAP[i][1];
+      var col = (st.map && st.map[i] !== undefined) ? st.map[i] : REPORT_MAP[i][1];
       var derived = typeof REPORT_DERIVED !== 'undefined' ? REPORT_DERIVED[i + 1] : null;
-      var v = derived ? reportDerivedValue(derived, src) : (col ? src[col - 1] : '');
+      var v = derived ? reportDerivedValue(derived, src, st.colShift) : (col ? src[col - 1] : '');
       if (v === undefined || v === null) v = '';
       // A blank in the measure block means "nothing there", which has to read
       // as 0 to be summable. Outside that range a blank stays blank.
