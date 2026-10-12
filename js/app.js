@@ -4,6 +4,17 @@
 
   var $ = function (id) { return document.getElementById(id); };
 
+  /* Attach a listener only if the element exists. ?v= busts js and css but not
+   * index.html, so new JS can run against an older cached page; a missing
+   * element would otherwise throw at load, boot() would never run, and with
+   * every screen starting hidden the page would come up blank. */
+  function on(id, ev, fn) {
+    var el = $(id);
+    if (el) el.addEventListener(ev, fn);
+    else console.warn('app.js: #' + id + ' missing — reload with Ctrl+F5');
+  }
+
+
   var state = {
     dates: [], folders: [], queue: [], pos: -1,
     record: null,          // current getRecord payload
@@ -54,7 +65,7 @@
     }
   }
 
-  $('login-form').addEventListener('submit', async function (ev) {
+  on('login-form', 'submit', async function (ev) {
     ev.preventDefault();
     var btn = $('login-btn'); btn.disabled = true; btn.textContent = 'Signing in…';
     $('login-error').classList.add('hidden');
@@ -81,10 +92,10 @@
 
   // Sign out shows the session summary first (falls back to plain logout
   // if the backend does not support summaries yet)
-  $('btn-logout').addEventListener('click', function () { openSummary(true); });
-  $('btn-session').addEventListener('click', function () { openSummary(false); });
-  $('summary-close').addEventListener('click', function () { $('summary-modal').classList.add('hidden'); });
-  $('summary-signout').addEventListener('click', doLogout);
+  on('btn-logout', 'click', function () { openSummary(true); });
+  on('btn-session', 'click', function () { openSummary(false); });
+  on('summary-close', 'click', function () { $('summary-modal').classList.add('hidden'); });
+  on('summary-signout', 'click', doLogout);
 
   /* ================= session summary ================= */
 
@@ -164,7 +175,7 @@
     } catch (e) { if (e.staleSession) return; toast(e.message, 'err'); if (e.auth) showLogin(); }
   }
 
-  $('f-date').addEventListener('change', async function () {
+  on('f-date', 'change', async function () {
     var date = this.value;
     ['f-folder', 'f-city', 'f-auditor', 'f-channel'].forEach(function (id) { $(id).disabled = true; });
     $('btn-load').disabled = true;
@@ -183,15 +194,15 @@
     } catch (e) { if (e.staleSession) return; toast(e.message, 'err'); if (e.auth) showLogin(); }
   });
 
-  $('f-folder').addEventListener('change', function () {
+  on('f-folder', 'change', function () {
     $('btn-load').disabled = !this.value;
   });
 
-  $('btn-load').addEventListener('click', loadQueue);
+  on('btn-load', 'click', loadQueue);
 
   // Re-reads the date from Drive: imports survey rows uploaded after the QC
   // sheet was created and picks up newly added photos.
-  $('btn-refresh').addEventListener('click', async function () {
+  on('btn-refresh', 'click', async function () {
     var date = $('f-date').value;
     if (!date) return;
     var btn = this;
@@ -320,8 +331,8 @@
     sel.onchange = function () { goTo(Number(sel.value)); };
   }
 
-  $('btn-prev').addEventListener('click', function () { step(-1); });
-  $('btn-next').addEventListener('click', function () { step(1); });
+  on('btn-prev', 'click', function () { step(-1); });
+  on('btn-next', 'click', function () { step(1); });
 
   function step(dir) {
     if (!state.queue.length) return;
@@ -512,7 +523,7 @@
     return changes;
   }
 
-  $('btn-reset').addEventListener('click', function () {
+  on('btn-reset', 'click', function () {
     $('measures-table').querySelectorAll('input,select').forEach(function (el) {
       el.value = el.dataset.original;
       el.classList.remove('changed');
@@ -685,11 +696,11 @@
   window.addEventListener('mouseup', function () { drag = null; });
   stage.addEventListener('dblclick', fitImage);
 
-  $('btn-zoom-in').addEventListener('click', function () { zoomAt(stage.clientWidth / 2, stage.clientHeight / 2, 1.3); });
-  $('btn-zoom-out').addEventListener('click', function () { zoomAt(stage.clientWidth / 2, stage.clientHeight / 2, 1 / 1.3); });
-  $('btn-zoom-fit').addEventListener('click', fitImage);
-  $('btn-zoom-100').addEventListener('click', function () { view.scale = 1; applyView(); });
-  $('btn-rotate').addEventListener('click', function () { view.rotation = (view.rotation + 90) % 360; fitImage(); });
+  on('btn-zoom-in', 'click', function () { zoomAt(stage.clientWidth / 2, stage.clientHeight / 2, 1.3); });
+  on('btn-zoom-out', 'click', function () { zoomAt(stage.clientWidth / 2, stage.clientHeight / 2, 1 / 1.3); });
+  on('btn-zoom-fit', 'click', fitImage);
+  on('btn-zoom-100', 'click', function () { view.scale = 1; applyView(); });
+  on('btn-rotate', 'click', function () { view.rotation = (view.rotation + 90) % 360; fitImage(); });
   window.addEventListener('resize', fitImage);
 
   /* ================= save / flag ================= */
@@ -744,15 +755,15 @@
     finally { btn.disabled = false; }
   }
 
-  $('btn-save').addEventListener('click', function () { save('DONE'); });
+  on('btn-save', 'click', function () { save('DONE'); });
 
-  $('btn-flag').addEventListener('click', function () {
+  on('btn-flag', 'click', function () {
     $('flag-remarks').value = '';
     $('flag-modal').classList.remove('hidden');
     $('flag-remarks').focus();
   });
-  $('flag-cancel').addEventListener('click', function () { $('flag-modal').classList.add('hidden'); });
-  $('flag-confirm').addEventListener('click', function () {
+  on('flag-cancel', 'click', function () { $('flag-modal').classList.add('hidden'); });
+  on('flag-confirm', 'click', function () {
     $('flag-modal').classList.add('hidden');
     save('FLAGGED', $('flag-remarks').value.trim());
   });
@@ -782,5 +793,9 @@
   }
   function hideToast() { $('toast').className = 'toast hidden'; }
 
-  boot();
+  // The sign-in screen must appear even if something above failed to wire up.
+  try { boot(); } catch (e) {
+    console.error('app.js boot failed: ' + (e && e.message));
+    var ls = $('login-screen'); if (ls) ls.classList.remove('hidden');
+  }
 })();

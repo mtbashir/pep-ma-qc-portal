@@ -4,6 +4,21 @@
 
   var $ = function (id) { return document.getElementById(id); };
 
+  /* Attach a listener only if the element is there.
+   *
+   * The ?v= query busts js and css but NOT admin.html, so a browser can run new
+   * JS against an older cached page. Calling addEventListener on a missing
+   * element throws at load, boot() never runs, and because both screens start
+   * hidden the page shows nothing at all — it looks like login is broken. */
+  function on(id, ev, fn) {
+    var el = $(id);
+    if (el) el.addEventListener(ev, fn);
+    else console.warn('admin.js: #' + id + ' missing — reload with Ctrl+F5 to refresh the page itself');
+  }
+  function setDisabled(id, v) { var el = $(id); if (el) el.disabled = v; }
+  function show(id, v) { var el = $(id); if (el) el.classList.toggle('hidden', !v); }
+
+
   function showLogin() {
     $('login-screen').classList.remove('hidden');
     $('app-screen').classList.add('hidden');
@@ -37,7 +52,7 @@
     }
   }
 
-  $('login-form').addEventListener('submit', async function (ev) {
+  on('login-form', 'submit', async function (ev) {
     ev.preventDefault();
     var btn = $('login-btn'); btn.disabled = true; btn.textContent = 'Signing in…';
     $('login-error').classList.add('hidden');
@@ -54,7 +69,7 @@
     } finally { btn.disabled = false; btn.textContent = 'Sign in'; }
   });
 
-  $('btn-logout').addEventListener('click', async function () {
+  on('btn-logout', 'click', async function () {
     try { await window.QCApi.call('logout'); } catch (e) { /* ignore */ }
     window.QCApi.clearSession();
     location.reload();
@@ -92,7 +107,7 @@
     } catch (e) { if (e.staleSession) return; toast(e.message, 'err'); if (e.auth) showLogin(); }
   }
 
-  $('create-form').addEventListener('submit', async function (ev) {
+  on('create-form', 'submit', async function (ev) {
     ev.preventDefault();
     var msg = $('create-msg');
     msg.classList.add('hidden');
@@ -156,7 +171,7 @@
     }
   }
 
-  $('btn-sessions-refresh').addEventListener('click', loadSessions);
+  on('btn-sessions-refresh', 'click', loadSessions);
 
   /* ---------------- progress / export ---------------- */
 
@@ -173,12 +188,12 @@
     } catch (e) { toast(e.message, 'err'); }
   }
 
-  $('prog-date').addEventListener('change', function () {
+  on('prog-date', 'change', function () {
     $('btn-progress').disabled = !this.value;
     $('btn-export').disabled = !this.value;
   });
 
-  $('btn-progress').addEventListener('click', async function () {
+  on('btn-progress', 'click', async function () {
     var date = $('prog-date').value;
     if (!date) return;
     this.disabled = true; this.textContent = 'Loading…';
@@ -212,7 +227,7 @@
     finally { this.disabled = false; this.textContent = 'Show progress'; }
   });
 
-  $('btn-export').addEventListener('click', async function () {
+  on('btn-export', 'click', async function () {
     var date = $('prog-date').value;
     if (!date) return;
     this.disabled = true; this.textContent = 'Exporting…';
@@ -253,16 +268,16 @@
     } catch (e) { /* non-fatal — the rest of the page still works */ }
   }
 
-  $('half-pick').addEventListener('change', function () {
-    $('btn-half-build').disabled = !this.value;
-    $('btn-report-only').disabled = !this.value;
+  on('half-pick', 'change', function () {
+    setDisabled('btn-half-build', !this.value);
+    setDisabled('btn-report-only', !this.value);
     var opt = this.selectedOptions[0];
     var link = $('half-link');
     if (opt && opt.dataset.url) { link.href = opt.dataset.url; link.classList.remove('hidden'); }
     else link.classList.add('hidden');
   });
 
-  $('btn-half-build').addEventListener('click', async function () {
+  on('btn-half-build', 'click', async function () {
     var v = $('half-pick').value;
     if (!v) return;
     var parts = v.split('|'), month = parts[0], half = parts[1];
@@ -351,7 +366,7 @@
    * (15 dates, each refreshed from Kobo), and reporting runs only once that
    * finishes — so refreshing the report alone used to mean sitting through a
    * half-hour recombine, and closing the tab left no report at all. */
-  $('btn-report-only').addEventListener('click', async function () {
+  on('btn-report-only', 'click', async function () {
     var v = $('half-pick').value;
     if (!v) return;
     var parts = v.split('|'), month = parts[0], half = parts[1];
@@ -371,8 +386,8 @@
         toast('Still going — press Reporting only again to carry on.', 'err');
         return;
       }
-      $('report-link').href = rep.url;
-      $('report-link').classList.remove('hidden');
+      var rl = $('report-link');
+      if (rl) { rl.href = rep.url; rl.classList.remove('hidden'); }
       $('half-status').textContent = rep.name + ' — ' + rep.rows + ' rows × ' +
         rep.columns + ' columns from ' + rep.source +
         ((rep.warnings && rep.warnings.length)
@@ -399,5 +414,9 @@
     toastTimer = setTimeout(function () { t.className = 'toast hidden'; }, 3000);
   }
 
-  boot();
+  // Whatever failed to wire up above, the login screen still has to appear.
+  try { boot(); } catch (e) {
+    console.error('admin.js boot failed: ' + (e && e.message));
+    var ls = $('login-screen'); if (ls) ls.classList.remove('hidden');
+  }
 })();
