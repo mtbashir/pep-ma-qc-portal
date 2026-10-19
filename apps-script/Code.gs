@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '5.4',
+  VERSION: '5.5',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -1970,6 +1970,30 @@ function yesNoColumns(srcHeaders) {
   return hit;
 }
 
+/**
+ * Source columns that feed the reporting measure block (O..DX).
+ *
+ * Defined off REPORT_MAP rather than a second heuristic, so the combined file
+ * and the reporting cut can never disagree about what counts as a measure:
+ * cooler availability, counts, types, placement, shelves, facings and MSL
+ * compliance. A blank in one of these is "nothing there" and has to read as 0
+ * to be summable; every other column keeps a genuine blank, because 0 in a
+ * store name, a date, a QC status or a missing photo link is wrong data.
+ */
+function measureSourceColumns(srcHeaders) {
+  var want = {};
+  var to = Math.min(CONFIG.REPORT_ZERO_TO, REPORT_MAP.length);
+  for (var i = CONFIG.REPORT_ZERO_FROM - 1; i < to; i++) {
+    var t = String(REPORT_MAP[i][2] || '');
+    if (t) want[t] = true;
+  }
+  var hit = {};
+  for (var c = 0; c < srcHeaders.length; c++) {
+    if (hasOwn(want, String(srcHeaders[c] || ''))) hit[c] = true;
+  }
+  return hit;
+}
+
 /** Reads one date's QC sheet and appends its rows, remapped by header name. */
 function hmAppendDate(st, date, headers, index) {
   var srcId = st.ids[date];
@@ -1994,6 +2018,7 @@ function hmAppendDate(st, date, headers, index) {
   var dateCol = hasOwn(index, CONFIG.SOURCE_DATE_HEADER) ? index[CONFIG.SOURCE_DATE_HEADER] : -1;
   var idCol = srcHeaders.indexOf(CONFIG.ID_HEADER);
   var yesNo = yesNoColumns(srcHeaders);
+  var measure = measureSourceColumns(srcHeaders);
   var width = headers.length;
 
   // One Drive listing per folder for this date, reused across all its rows.
@@ -2024,11 +2049,14 @@ function hmAppendDate(st, date, headers, index) {
     var n = Math.min(src.length, map.length);
     for (var s = 0; s < n; s++) {
       var dst = map[s];
-      // Normalise here too: QC sheets written before this fix still hold text
-      // where a number belongs, and the reporting totals have to add up.
-      if (dst >= 0 && src[s] !== undefined && src[s] !== null) {
-        line[dst] = sheetValue(hasOwn(yesNo, s) ? yesNoValue(src[s]) : src[s]);
-      }
+      if (dst < 0) continue;
+      // sheetValue() because QC sheets written before v5.3 still hold text
+      // where a number belongs, and the totals downstream have to add up.
+      var raw = src[s];
+      var val = (raw === undefined || raw === null) ? ''
+              : sheetValue(hasOwn(yesNo, s) ? yesNoValue(raw) : raw);
+      if (val === '' && hasOwn(measure, s)) val = 0;     // measures must sum
+      line[dst] = val;
     }
     if (dateCol >= 0) line[dateCol] = date;
     if (photos) {

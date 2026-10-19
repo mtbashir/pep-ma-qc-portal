@@ -193,6 +193,17 @@ hand with the portal's ↻ button. A date that cannot be refreshed (missing Kobo
 workbook, say) is still combined from whatever its QC sheet holds, and the
 failure is counted and named in the result rather than sinking the build.
 
+### Yes / No as 1 / 0
+
+The three "Is the cooler switched ON and operational?" questions (PEP 2.1.7,
+KO 2.2.7, OTHERS 2.3.7) come from Kobo as `Yes`/`No`. The combine writes them as
+`1`/`0` so they sum, matched on the question-code prefix so neighbours like
+2.1.8 and 2.1.70 are not caught. `CONFIG.YES_NO_HEADER_PREFIXES`.
+
+The daily `QC RD <date>` sheets are left exactly as Kobo produced them — the QC
+portal reads and edits that field, so changing the stored value there risks
+breaking how it is displayed and saved.
+
 ### Blank measures read as 0
 
 Reporting columns **O..DX** (1-based 15–128, 114 columns) get `0` where the
@@ -202,6 +213,17 @@ facings, and MSL compliance. Set by `CONFIG.REPORT_ZERO_FROM` / `REPORT_ZERO_TO`
 
 Everything outside it keeps a genuine blank — store identifiers, photo links,
 GPS (0,0 is a real coordinate), the QC columns and dates.
+
+The **combined** file zero-fills the same measures, using the source columns that
+feed that band rather than a separate heuristic, so the two files can never
+disagree about what a measure is. On the live October layout that resolves to 111
+source columns — the 114 in the band minus the 3 derived VISI & CHEST columns,
+which have no source and are covered by the reporting zero-fill instead — with no
+identifier, QC or photo column caught.
+
+A blank is only filled where it means "nothing there". `0` in a store name, a
+date, a QC status or a missing photo link would be wrong data, so those stay
+blank.
 
 `PEP/KO/OTH COOLER - TYPE VISI & CHEST COOLER` (#19, #52, #83) have no source
 column in Sheet3 because they are **derived**: 1 only when that block's Visi and
