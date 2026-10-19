@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '5.3',
+  VERSION: '5.4',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -39,6 +39,22 @@ var CONFIG = {
   // (16th-end of month). A build stops adding dates after HALF_BUDGET_MS so it
   // stays inside one execution, and the next call resumes where it stopped.
   SOURCE_DATE_HEADER: 'QC Source Date',
+
+  // Kobo answers these as "Yes"/"No"; reporting needs them summable, so they
+  // are written as 1/0. Matched on the question-code prefix of the source
+  // header: PEP 2.1.7, KO 2.2.7, OTHERS 2.3.7 "Is the cooler switched ON".
+  YES_NO_HEADER_PREFIXES: ['2.1.7:', '2.2.7:', '2.3.7:'],
+
+  // Reporting columns J..N carry the Drive link to the FIRST photo of each
+  // folder, taken from the link block at OM..OX rather than Kobo's own _URL
+  // column. The link block stays where it is as well.
+  REPORT_GD_OVERRIDE: [
+    [10, 'GD LINK - STORE PHOTO'],
+    [11, 'GD LINK - PEP COOLER'],
+    [12, 'GD LINK - KO COOLER'],
+    [13, 'GD LINK - OTHERS COOLER'],
+    [14, 'GD LINK - MT SHELVES']
+  ],
   // Hard ceiling for one execution is 6 minutes. Work stops well before that,
   // and a date is only started if the previous one's duration suggests it will
   // finish — starting a slow date late is how a run gets killed mid-write.
@@ -1933,6 +1949,27 @@ function hmAppendRows(st, rows, width) {
   }
 }
 
+/** "Yes" -> 1, "No" -> 0; anything else untouched. */
+function yesNoValue(v) {
+  if (typeof v !== 'string') return v;
+  var t = v.trim().toLowerCase();
+  if (t === 'yes') return 1;
+  if (t === 'no') return 0;
+  return v;
+}
+
+/** Source columns whose header starts with one of the Yes/No question codes. */
+function yesNoColumns(srcHeaders) {
+  var hit = {};
+  for (var i = 0; i < srcHeaders.length; i++) {
+    var h = String(srcHeaders[i] || '').trim();
+    for (var p = 0; p < CONFIG.YES_NO_HEADER_PREFIXES.length; p++) {
+      if (h.indexOf(CONFIG.YES_NO_HEADER_PREFIXES[p]) === 0) { hit[i] = true; break; }
+    }
+  }
+  return hit;
+}
+
 /** Reads one date's QC sheet and appends its rows, remapped by header name. */
 function hmAppendDate(st, date, headers, index) {
   var srcId = st.ids[date];
@@ -1956,6 +1993,7 @@ function hmAppendDate(st, date, headers, index) {
   var map = srcHeaders.map(function (h) { return hasOwn(index, h) ? index[h] : -1; });
   var dateCol = hasOwn(index, CONFIG.SOURCE_DATE_HEADER) ? index[CONFIG.SOURCE_DATE_HEADER] : -1;
   var idCol = srcHeaders.indexOf(CONFIG.ID_HEADER);
+  var yesNo = yesNoColumns(srcHeaders);
   var width = headers.length;
 
   // One Drive listing per folder for this date, reused across all its rows.
@@ -1988,7 +2026,9 @@ function hmAppendDate(st, date, headers, index) {
       var dst = map[s];
       // Normalise here too: QC sheets written before this fix still hold text
       // where a number belongs, and the reporting totals have to add up.
-      if (dst >= 0 && src[s] !== undefined && src[s] !== null) line[dst] = sheetValue(src[s]);
+      if (dst >= 0 && src[s] !== undefined && src[s] !== null) {
+        line[dst] = sheetValue(hasOwn(yesNo, s) ? yesNoValue(src[s]) : src[s]);
+      }
     }
     if (dateCol >= 0) line[dateCol] = date;
     if (photos) {
@@ -2577,7 +2617,7 @@ function hmAutoStep() {
           return;
         }
         var rst = auto.rpFresh === false ? rpGetState(job.month, job.half) : null;
-        if (rst && !rst.linkSrc) rst = null;          // predates the link columns
+        if (rst && (!rst.linkSrc || !rst.gdOverride)) rst = null;   // predates link/GD columns
         if (!rst) rst = rpStart(job.month, job.half);
         rst = rpRunBudget(rst, left);
         rpSetState(rst);
@@ -2774,6 +2814,9 @@ function rpStart(month, half) {
   var links = photoLinkHeaders();
   var headers = reportHeaders().concat(links);
   var linkSrc = links.map(function (h) { return srcHeaders.indexOf(h) + 1; });  // 0 = absent
+  var gdOverride = CONFIG.REPORT_GD_OVERRIDE.map(function (o) {
+    return [o[0] - 1, srcHeaders.indexOf(o[1]) + 1];        // [0-based report col, src col]
+  });
   var name = reportName(month, half);
   var existing = files.filter(function (f) {
     return f.name.trim() === name && f.mimeType === 'application/vnd.google-apps.spreadsheet';
@@ -2803,6 +2846,7 @@ function rpStart(month, half) {
     ssId: ssId, tab: props.title,
     srcId: src.id, srcTab: srcProps.title,
     srcRows: srcProps.rows, srcCols: srcProps.cols,
+    gdOverride: gdOverride,        // J..N take the first photo's Drive link
     map: res.cols,                 // resolved source column per reporting column
     colShift: (function () {       // old source column -> where it actually is
       var o = {};
@@ -2886,6 +2930,13 @@ function rpCopyChunk(st, dateCol) {
       var lv = ls[k] ? src[ls[k] - 1] : '';
       line[REPORT_MAP.length + k] = (lv === undefined || lv === null) ? '' : lv;
     }
+    // J..N show the Drive link to each folder's first photo instead of Kobo's
+    // own _URL. Done last so it wins over whatever the map produced.
+    var gd = st.gdOverride || [];
+    for (var g = 0; g < gd.length; g++) {
+      var gv = gd[g][1] ? src[gd[g][1] - 1] : '';
+      line[gd[g][0]] = (gv === undefined || gv === null) ? '' : gv;
+    }
     out.push(line);
   }
 
@@ -2953,7 +3004,7 @@ function buildReporting(p) {
   try {
     var st = p.reset ? null : rpGetState(month, half);
     if (st && (st.nextRow > st.srcRows)) st = null;                  // finished -> rebuild
-    if (st && !st.linkSrc) st = null;                                // predates link columns
+    if (st && (!st.linkSrc || !st.gdOverride)) st = null;            // predates link/GD columns
     if (st) {
       var rAge = new Date().getTime() - new Date(st.startedAt || 0).getTime();
       if (!(rAge >= 0) || rAge > CONFIG.HALF_RESUME_MAX_MS) st = null;
