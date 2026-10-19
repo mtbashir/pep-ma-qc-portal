@@ -159,6 +159,26 @@ added and removed mid-month — Aug 1 2026 had 401 Kobo columns, Aug 2 onwards h
 * Dates with no QC sheet yet (never opened in the portal) are **skipped**, and
   reported back so you know which ones to open and refresh first.
 
+### Numbers stay numbers
+
+`fmtValue()` stringifies everything, which is right for the JSON the QC page
+renders and wrong for writing cells. `syncNewRows()` used it, so every row the
+refresh appended was written through `valueInputOption: RAW` as **text** — a
+`"1"` that no longer matched the numeric `1` the xlsx conversion produced for the
+same question, and totals in the combined and reporting files stopped adding up.
+
+Sheet writes now go through `sheetValue()`, which keeps numbers and booleans as
+they are, formats Dates, and converts a numeric-looking string. It deliberately
+leaves alone anything where converting would lose information: leading zeros
+(`007`, phone numbers), runs longer than 15 significant digits, and anything with
+spaces, commas or other characters — so store IDs like `1.KHI`, names and GPS
+text are untouched.
+
+The combine applies it too, so QC sheets written before this fix are normalised
+on their way into the combined file and therefore the reporting cut. The daily
+`KOBO RD <date>.xlsx` was never affected — Kobo's export types its numbers
+correctly, verified across three dates with zero text-numeric cells.
+
 ### Refresh before combine
 
 `QC RD <date>` is a snapshot taken the first time that date is opened in the

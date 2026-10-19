@@ -22,7 +22,7 @@ var CONFIG = {
   // Bumped whenever this file changes. Open the web app URL in a browser to
   // see which version is actually deployed — the editor's "Deploy" button
   // keeps serving the old snapshot unless you pick Version: "New version".
-  VERSION: '5.2',
+  VERSION: '5.3',
 
   QUEUE_FIRST_PAGE: 60,     // shown immediately
   QUEUE_PAGE: 150,          // fetched in the background afterwards
@@ -796,7 +796,7 @@ function syncNewRows(date) {
       var row = [];
       for (var c = 0; c < idx.headers.length; c++) row.push('');
       srcHeaders.forEach(function (h, c) {
-        if (destCol[c] >= 0) row[destCol[c]] = fmtValue(values[r][c]);
+        if (destCol[c] >= 0) row[destCol[c]] = sheetValue(values[r][c]);
       });
       newRows.push(row);
     }
@@ -1281,6 +1281,38 @@ function readRow(idx, rowNum) {
   var row = firstLine(valuesBatchGet(idx.ssId, [range])[0]);
   while (row.length < idx.headers.length) row.push('');
   return row;
+}
+
+/**
+ * A value on its way INTO a sheet, with its type kept.
+ *
+ * fmtValue() stringifies everything, which is right for the JSON the QC page
+ * renders but wrong for writing cells: appended through valueInputOption RAW, a
+ * stringified "1" becomes TEXT, so it no longer matches the numeric 1 that the
+ * xlsx conversion produced for the same question, and nothing downstream adds
+ * up. Numbers and booleans therefore pass through unchanged, Dates are
+ * formatted, and a numeric-looking string is converted.
+ *
+ * Deliberately NOT converted, because converting loses information:
+ *   - leading zeros  ("007", "03001234567" — codes and phone numbers)
+ *   - more than 15 significant digits (beyond exact double precision)
+ *   - anything with spaces, commas, plus signs or other characters
+ */
+var SHEET_NUMERIC_TEXT = /^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/;
+
+function sheetValue(v) {
+  if (v === null || v === undefined) return '';
+  if (Object.prototype.toString.call(v) === '[object Date]') {
+    return Utilities.formatDate(v, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+  }
+  if (typeof v !== 'string') return v;                  // number, boolean: keep as-is
+  var t = v.trim();
+  if (!t) return '';
+  if (SHEET_NUMERIC_TEXT.test(t) &&
+      t.replace('-', '').replace('.', '').length <= 15) {
+    return Number(t);
+  }
+  return v;
 }
 
 function fmtValue(v) {
@@ -1954,7 +1986,9 @@ function hmAppendDate(st, date, headers, index) {
     var n = Math.min(src.length, map.length);
     for (var s = 0; s < n; s++) {
       var dst = map[s];
-      if (dst >= 0 && src[s] !== undefined && src[s] !== null) line[dst] = src[s];
+      // Normalise here too: QC sheets written before this fix still hold text
+      // where a number belongs, and the reporting totals have to add up.
+      if (dst >= 0 && src[s] !== undefined && src[s] !== null) line[dst] = sheetValue(src[s]);
     }
     if (dateCol >= 0) line[dateCol] = date;
     if (photos) {
